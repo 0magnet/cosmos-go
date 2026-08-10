@@ -106,3 +106,11 @@ func parseRGBA(value string) [4]float64 {
 	}
 	return [4]float64{0, 0, 0, 1}
 }
+
+// GetRgbaColor converts a CSS color string into normalized [r g b a]
+// values (0..1) suitable for SetPointColors / SetLinkColors — the
+// equivalent of the getRgbaColor helper exported by cosmos.gl.
+func GetRgbaColor(value string) [4]float32 {
+	c := parseRGBA(value)
+	return [4]float32{float32(c[0]), float32(c[1]), float32(c[2]), float32(c[3])}
+}

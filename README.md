@@ -80,7 +80,7 @@ All bulk data uses flat `[]float32` slices mirroring the Float32Array API of cos
 | Method | Format |
 |---|---|
 | `SetPointPositions([]float32, dontRescale ...bool)` | `[x1, y1, x2, y2, ...]` |
-| `SetPointColors([]float32)` | `[r, g, b, a, ...]`, RGB 0..255, alpha 0..1 |
+| `SetPointColors([]float32)` | `[r, g, b, a, ...]` normalized 0..1 (use `GetRgbaColor`) |
 | `SetPointSizes([]float32)` | `[size1, size2, ...]` |
 | `SetPointShapes([]float32)` | `ShapeCircle`, `ShapeSquare`, `ShapeTriangle`, `ShapeDiamond`, `ShapePentagon`, `ShapeHexagon`, `ShapeStar`, `ShapeCross`, `ShapeNone` |
 | `SetImageData([]js.Value)` / `SetPointImageIndices` / `SetPointImageSizes` | JS `ImageData` objects packed into a texture atlas |
@@ -111,6 +111,16 @@ Mirroring the cosmos.gl v2 API:
 - Misc: `GetAdjacentIndices`, `SetFocusedPointByIndex`, `SpaceToScreenPosition`, `ScreenToSpacePosition`, `SpaceToScreenRadius`, `GetPointRadiusByIndex`, `EnableZoom()` / `DisableZoom()`
 
 Interactions match the original: drag to pan, mouse wheel to zoom, double-click to zoom in (shift + double-click to zoom out), drag points with the mouse when `EnableDrag` is set (hold Space to pan instead), and hold the right mouse button to repel points when `EnableRightClickRepulsion` is set.
+
+### Verified equivalence with the original
+
+`examples/compare` contains a harness that runs this port and the original JS library side by side on identical data with identical configuration (see its `compare-go.html` / `compare-js.html` and the deterministic `?sim=0` / `?det=1&alpha0=1` modes). Measured results against `@cosmos.gl/graph` 2.6.3:
+
+- Point positions after rescaling: **bit-identical** (max difference 0.0)
+- Fit-view zoom level: **bit-identical** (matches to the last float digit)
+- Rendered output: geometrically identical (bounding boxes equal, centroid within 0.06 px; remaining pixel differences are antialiasing noise)
+- Physics: a full deterministic simulation step (gravity, many-body, springs, integration) produces **bit-identical positions**; over many steps the two runs diverge *less* than the original diverges from itself with a different random seed (the divergence is chaotic jitter-seed sensitivity, not different physics)
+- Frame times: render-only both lock at 60 fps (p95 16.8 ms); with the simulation running, frame times match the original within noise (the simulation is GPU-bound)
 
 ### Differences from cosmos.gl
 

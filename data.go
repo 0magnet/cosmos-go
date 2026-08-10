@@ -87,20 +87,11 @@ func (g *graphData) updatePointColor() {
 			g.pointColors[i*4+3] = float32(defaultRgba[3])
 		}
 	} else {
-		g.pointColors = make([]float32, n*4)
-		for i := 0; i < n; i++ {
-			c := [4]float32{
-				g.inputPointColors[i*4+0] / 255,
-				g.inputPointColors[i*4+1] / 255,
-				g.inputPointColors[i*4+2] / 255,
-				g.inputPointColors[i*4+3],
+		g.pointColors = g.inputPointColors
+		for i := 0; i < n*4; i++ {
+			if math.IsNaN(float64(g.pointColors[i])) {
+				g.pointColors[i] = float32(defaultRgba[i%4])
 			}
-			for j := 0; j < 4; j++ {
-				if math.IsNaN(float64(c[j])) {
-					c[j] = float32(defaultRgba[j])
-				}
-			}
-			copy(g.pointColors[i*4:], c[:])
 		}
 	}
 }
@@ -224,20 +215,11 @@ func (g *graphData) updateLinkColor() {
 			g.linkColors[i*4+3] = float32(defaultRgba[3])
 		}
 	} else {
-		g.linkColors = make([]float32, n*4)
-		for i := 0; i < n; i++ {
-			c := [4]float32{
-				g.inputLinkColors[i*4+0] / 255,
-				g.inputLinkColors[i*4+1] / 255,
-				g.inputLinkColors[i*4+2] / 255,
-				g.inputLinkColors[i*4+3],
+		g.linkColors = g.inputLinkColors
+		for i := 0; i < n*4; i++ {
+			if math.IsNaN(float64(g.linkColors[i])) {
+				g.linkColors[i] = float32(defaultRgba[i%4])
 			}
-			for j := 0; j < 4; j++ {
-				if math.IsNaN(float64(c[j])) {
-					c[j] = float32(defaultRgba[j])
-				}
-			}
-			copy(g.linkColors[i*4:], c[:])
 		}
 	}
 }
