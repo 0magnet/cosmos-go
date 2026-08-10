@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cosmos-go — GPU force graph in Go/WebAssembly</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1117; }
+  #cosmos { width: 100vw; height: 100vh; display: block; }
+  #ui {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 2;
+    font-family: Arial, sans-serif;
+    color: #fff;
+  }
+  #ui h1 { font-size: 16px; margin: 0 0 2px; }
+  #ui a { color: #7bb2ff; font-size: 12px; }
+  #ui .buttons { margin-top: 8px; }
+  #ui button {
+    margin: 2px 4px 2px 0;
+    padding: 6px 10px;
+    border: 0;
+    border-radius: 5px;
+    background: #1f6feb;
+    color: #fff;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #ui button:hover { background: #388bfd; }
+  #status { margin-top: 6px; font-size: 12px; color: #8b949e; min-height: 15px; }
+  #hint { position: fixed; bottom: 10px; left: 12px; font: 11px Arial, sans-serif; color: #8b949e; z-index: 2; }
+</style>
+</head>
+<body>
+<canvas id="cosmos"></canvas>
+<div id="ui">
+  <h1>cosmos-go</h1>
+  <a href="https://github.com/0magnet/cosmos-go">github.com/0magnet/cosmos-go</a>
+  <div class="buttons">
+    <button id="btn-fit">Fit View</button>
+    <button id="btn-restart">Restart</button>
+    <button id="btn-pause">Pause / Resume</button>
+    <button id="btn-select">Select Cluster</button>
+    <button id="btn-unselect">Unselect</button>
+    <button id="btn-zoomto">Zoom to Node</button>
+  </div>
+  <div id="status"></div>
+</div>
+<div id="hint">drag to pan &middot; wheel to zoom &middot; double-click to zoom in &middot; hold right mouse button to repel nodes</div>
+<script src="wasm_exec.js"></script>
+<script>
+  const go = new Go();
+  WebAssembly.instantiateStreaming(fetch("demo.wasm"), go.importObject)
+    .then(result => go.run(result.instance));
+</script>
+</body>
+</html>
