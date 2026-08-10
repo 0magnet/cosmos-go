@@ -1,21 +1,21 @@
 <p align="center">
   <h1 align="center">🌌 cosmos-go</h1>
 </p>
-<p align="center">GPU-accelerated Force Graph — <a href="https://github.com/cosmograph-org/cosmos">Cosmos</a> ported to Go/WebAssembly</p>
+<p align="center">GPU-accelerated Force Graph — <a href="https://github.com/cosmograph-org/cosmos">cosmos.gl</a> ported to Go/WebAssembly</p>
 
-cosmos-go is a full Go port of [@cosmograph/cosmos](https://github.com/cosmograph-org/cosmos) 1.6.1, the WebGL force graph layout algorithm and rendering engine used by (among others) the Skywire network visualizer. All computations and drawing happen on the GPU in fragment and vertex shaders (carried over verbatim from the original), avoiding expensive memory operations. It enables real-time simulation of network graphs consisting of hundreds of thousands of nodes and edges on modern hardware.
+cosmos-go is a full Go port of [cosmos.gl](https://github.com/cosmograph-org/cosmos) **2.6.3** (MIT), the WebGL force graph layout algorithm and rendering engine behind [Cosmograph](https://cosmograph.app) — and, in its 1.x form, the Skywire network visualizer. All computations and drawing happen on the GPU in fragment and vertex shaders (carried over verbatim from the original), avoiding expensive memory operations. It enables real-time simulation of network graphs consisting of hundreds of thousands of points and links on modern hardware.
 
-The Go port drives the shaders through `syscall/js` with a raw-WebGL command layer (replacing `regl`), reimplements the d3-zoom pan/zoom behavior — including d3's smooth van Wijk–Nuij zoom transitions — and compiles with both the **standard Go toolchain** (`GOOS=js GOARCH=wasm`, ~3.3 MB) and **TinyGo** (`-target wasm`, ~550 KB).
+The Go port drives the shaders through `syscall/js` with a raw-WebGL command layer (replacing `regl`), reimplements the d3-zoom / d3-drag interaction behaviors — including d3's smooth van Wijk–Nuij zoom transitions — and compiles with both the **standard Go toolchain** (`GOOS=js GOARCH=wasm`, ~3.4 MB) and **TinyGo** (`-target wasm`, ~610 KB).
 
 [🎮 Live demo](https://0magnet.github.io/cosmos-go/) (compiled with TinyGo)
+
+Ported feature set: GPU force simulation (many-body repulsion in two variants, springs, gravity, centering, mouse repulsion, **clustering forces**), pan/zoom, **point dragging**, **pinned points**, **9 point shapes**, **image atlas point sprites**, hover ring, focus ring, GPU picking for points **and links**, link arrows, curved links, rectangle **and polygon** selection with greyout, position tracking, viewport sampling, fit-view animations, and deterministic layouts via random seed.
 
 ### Quick Start
 
 ```bash
 go get github.com/0magnet/cosmos-go
 ```
-
-Get the data, configure the graph and run the simulation:
 
 ```go
 package main
@@ -27,41 +27,41 @@ import (
 )
 
 func main() {
-    canvas := js.Global().Get("document").Call("querySelector", "canvas")
+    div := js.Global().Get("document").Call("getElementById", "graph")
 
     cfg := cosmos.NewConfig()
-    cfg.Simulation.Repulsion = 0.5
-    cfg.Events.OnClick = func(node *cosmos.Node, index int, pos [2]float64, event js.Value) {
-        if node != nil {
-            println("Clicked node:", node.ID)
-        }
+    cfg.SimulationRepulsion = 1.0
+    cfg.RenderHoveredPointRing = true
+    cfg.EnableDrag = true
+    cfg.OnPointClick = func(index int, pos [2]float64, event js.Value) {
+        println("clicked point", index)
     }
 
-    graph, err := cosmos.New(canvas, cfg)
+    graph, err := cosmos.New(div, cfg)
     if err != nil {
-        panic(err)
+        panic(err) // WebGL or a required extension is unavailable
     }
 
-    nodes := []cosmos.Node{
-        {ID: "a", Color: "#fd7f6f"},
-        {ID: "b", Color: "#7eb0d5"},
-        {ID: "c", Color: "#b2e061"},
-    }
-    links := []cosmos.Link{
-        {Source: "a", Target: "b"},
-        {Source: "b", Target: "c"},
-        {Source: "c", Target: "a"},
-    }
-    graph.SetData(nodes, links, true)
+    // flat typed-array data, exactly like the JS API
+    graph.SetPointPositions([]float32{4000, 4000, 4100, 4000, 4050, 4100}) // [x1,y1, x2,y2, ...]
+    graph.SetPointColors([]float32{ // [r,g,b,a, ...] with RGB 0..255, alpha 0..1
+        253, 127, 111, 1,
+        126, 176, 213, 1,
+        178, 224, 97, 1,
+    })
+    graph.SetLinks([]float32{0, 1, 1, 2, 2, 0}) // [source1,target1, ...] point indices
+
+    graph.Render()
 
     select {} // keep the Go runtime alive for the render loop
 }
 ```
 
 > **Note**
-> If your canvas element has no width and height styles (either CSS or inline), cosmos-go will automatically set them to 100%.
+> `New` takes a container `div`; the canvas is created inside it (like cosmos.gl v2).
+> WebGL 1 with the `OES_texture_float` and `ANGLE_instanced_arrays` extensions is required. Like the original, the Many-Body force also relies on float blending (`EXT_float_blend`), which iOS stopped exposing in 15.4.
 >
-> WebGL 1 with the `OES_texture_float` and `ANGLE_instanced_arrays` extensions is required (available in all modern desktop browsers). Like the original, the Many-Body force also relies on float blending (`EXT_float_blend`), which iOS stopped exposing in 15.4.
+> Unlike the 1.x line, cosmos v2 uses the positions you provide as-is (no random placement) — spread your initial positions around the space center (default space size 8192) or set `Config.RescalePositions`.
 
 Build and serve:
 
@@ -71,96 +71,65 @@ GOOS=js GOARCH=wasm go build -o app.wasm . && cp "$(go env GOROOT)/lib/wasm/wasm
 tinygo build -o app.wasm -target wasm -no-debug . && cp "$(tinygo env TINYGOROOT)/targets/wasm_exec.js" .
 ```
 
-See <a href="examples/demo">examples/demo</a> for a complete example with pan/zoom, hover, selection and a build script for both toolchains.
+See <a href="examples/demo">examples/demo</a> for a complete example with pan/zoom, hover, drag, selection, link hover and per-cluster point shapes, plus a build script for both toolchains.
 
 ### Data model
 
-Instead of the accessor functions of the JS original, nodes and links carry their optional per-item values directly (zero values fall back to the config defaults):
+All bulk data uses flat `[]float32` slices mirroring the Float32Array API of cosmos.gl:
 
-```go
-type Node struct {
-    ID          string
-    X, Y        float64 // initial / fixed position (used when HasPosition is true)
-    HasPosition bool
-    Color       string  // "" → Config.NodeColor
-    Size        float64 // 0  → Config.NodeSize
-}
+| Method | Format |
+|---|---|
+| `SetPointPositions([]float32, dontRescale ...bool)` | `[x1, y1, x2, y2, ...]` |
+| `SetPointColors([]float32)` | `[r, g, b, a, ...]`, RGB 0..255, alpha 0..1 |
+| `SetPointSizes([]float32)` | `[size1, size2, ...]` |
+| `SetPointShapes([]float32)` | `ShapeCircle`, `ShapeSquare`, `ShapeTriangle`, `ShapeDiamond`, `ShapePentagon`, `ShapeHexagon`, `ShapeStar`, `ShapeCross`, `ShapeNone` |
+| `SetImageData([]js.Value)` / `SetPointImageIndices` / `SetPointImageSizes` | JS `ImageData` objects packed into a texture atlas |
+| `SetLinks([]float32)` | `[source1, target1, ...]` point indices |
+| `SetLinkColors` / `SetLinkWidths` / `SetLinkArrows([]bool)` / `SetLinkStrength` | per-link values |
+| `SetPointClusters([]int)` | cluster index per point, `-1` = unclustered |
+| `SetClusterPositions([]float32)` | `[x1, y1, ...]`, negative = position at centermass |
+| `SetPointClusterStrength([]float32)` | per-point cluster force coefficients |
+| `SetPinnedPoints([]int)` | indices of fixed points (nil/empty = unpin all) |
 
-type Link struct {
-    Source, Target string
-    Color          string    // "" → Config.LinkColor
-    Width          float64   // 0  → Config.LinkWidth
-    Arrow          ArrowMode // ArrowDefault | ArrowOn | ArrowOff
-}
-```
+Data setters are lazy; call `Render()` (optionally with an alpha value) to apply them and start rendering.
 
 ### Configuration
 
-`cosmos.NewConfig()` returns a `*Config` with the same defaults as the original library. All configuration parameters of cosmos 1.6.1 are mirrored 1:1 with Go naming:
+`cosmos.NewConfig()` returns a `*Config` with the same defaults as cosmos.gl 2.6.3. All configuration parameters are mirrored with Go naming — flat simulation parameters (`SimulationDecay`, `SimulationGravity`, `SimulationRepulsion`, `SimulationRepulsionTheta`, `SimulationLinkSpring`, `SimulationLinkDistance`, `SimulationFriction`, `SimulationCluster`, ...), appearance (`BackgroundColor`, `PointDefaultColor`, `PointDefaultSize`, `PointOpacity`, `LinkDefaultColor`, `CurvedLinks`, `LinkVisibilityDistanceRange`, ...), interaction (`EnableZoom`, `EnableDrag`, `EnableRightClickRepulsion`, `ScalePointsOnZoom`, `ScaleLinksOnZoom`, ...), view fitting (`FitViewOnInit`, `FitViewDelay`, `FitViewPadding`, `FitViewByPointIndices`, ...), plus `RandomSeed`, `PixelRatio`, `SpaceSize`, `UseClassicQuadtree`, `ShowFPSMonitor` and `Attribution`.
 
-| Go field | JS equivalent | Default |
-|---|---|---|
-| `DisableSimulation` | `disableSimulation` | `false` |
-| `BackgroundColor` | `backgroundColor` | `#222222` |
-| `SpaceSize` | `spaceSize` | `4096` |
-| `NodeColor`, `NodeSize`, `NodeSizeScale` | `nodeColor`, `nodeSize`, `nodeSizeScale` | `#b3b3b3`, `4`, `1` |
-| `NodeGreyoutOpacity` | `nodeGreyoutOpacity` | `0.1` |
-| `RenderHoveredNodeRing`, `HoveredNodeRingColor`, `FocusedNodeRingColor` | `renderHoveredNodeRing`, ... | `true`, `white`, `white` |
-| `RenderLinks`, `LinkColor`, `LinkWidth`, `LinkWidthScale` | `renderLinks`, `linkColor`, ... | `true`, `#666666`, `1`, `1` |
-| `LinkGreyoutOpacity` | `linkGreyoutOpacity` | `0.1` |
-| `CurvedLinks`, `CurvedLinkSegments`, `CurvedLinkWeight`, `CurvedLinkControlPointDistance` | `curvedLinks`, ... | `false`, `19`, `0.8`, `0.5` |
-| `LinkArrows`, `LinkArrowsSizeScale` | `linkArrows`, `linkArrowsSizeScale` | `true`, `1` |
-| `LinkVisibilityDistanceRange`, `LinkVisibilityMinTransparency` | `linkVisibilityDistanceRange`, ... | `[50, 150]`, `0.25` |
-| `UseQuadtree` | `useQuadtree` | `false` |
-| `ShowFPSMonitor` | `showFPSMonitor` | `false` |
-| `PixelRatio` | `pixelRatio` | `2` |
-| `ScaleNodesOnZoom` | `scaleNodesOnZoom` | `true` |
-| `InitialZoomLevel` | `initialZoomLevel` | unset (`0`) |
-| `DisableZoom` | `disableZoom` | `false` |
-| `FitViewOnInit`, `FitViewDelay`, `FitViewByNodesInRect` | `fitViewOnInit`, ... | `true`, `250`, unset |
-| `RandomSeed` | `randomSeed` | `""` |
-| `NodeSamplingDistance` | `nodeSamplingDistance` | `150` |
-
-Simulation parameters live under `Config.Simulation` (`Decay`, `Gravity`, `Center`, `Repulsion`, `RepulsionTheta`, `RepulsionQuadtreeLevels`, `LinkSpring`, `LinkDistance`, `LinkDistRandomVariationRange`, `RepulsionFromMouse`, `Friction`) with callbacks `OnStart`, `OnTick`, `OnEnd`, `OnPause`, `OnRestart` — and event callbacks under `Config.Events` (`OnClick`, `OnMouseMove`, `OnNodeMouseOver`, `OnNodeMouseOut`, `OnZoomStart`, `OnZoom`, `OnZoomEnd`).
+Event callbacks are config fields with Go signatures (point/link indices, `-1` = none): `OnClick`, `OnPointClick`, `OnLinkClick`, `OnBackgroundClick`, `OnMouseMove`, `OnPointMouseOver/Out`, `OnLinkMouseOver/Out`, `OnZoomStart/OnZoom/OnZoomEnd`, `OnDragStart/OnDrag/OnDragEnd`, and the simulation lifecycle `OnSimulationStart/Tick/End/Pause/Unpause`.
 
 ### API
 
-Mirroring the [cosmos API](https://github.com/cosmograph-org/cosmos/wiki/API-Reference):
+Mirroring the cosmos.gl v2 API:
 
-- `New(canvas js.Value, cfg *Config) (*Graph, error)`
-- `SetData(nodes []Node, links []Link, runSimulation bool)`
-- `Start(alpha float64)` / `Pause()` / `Restart()` / `Step()` / `Destroy()`
-- `Progress()`, `IsSimulationRunning()`, `MaxPointSize()`
-- `Zoom(value, duration)` / `SetZoomLevel(value, duration)` / `GetZoomLevel()`
-- `FitView(duration, padding)` / `FitViewByNodeIDs(ids, duration, padding)`
-- `ZoomToNodeByID(id, duration, scale, canZoomOut)` / `ZoomToNodeByIndex(...)`
-- `GetNodePositions()`, `GetNodePositionsArray()`
-- `SelectNodesInRange(area, ok)`, `SelectNodeByID(id, withAdjacent)`, `SelectNodesByIDs(ids)`, `SelectNodesByIndices(indices)`, `UnselectNodes()`, `GetSelectedNodes()`
-- `GetAdjacentNodes(id)`
-- `SetFocusedNodeByID(id)` / `SetFocusedNodeByIndex(index)`
-- `SpaceToScreenPosition(pos)`, `SpaceToScreenRadius(r)`
-- `GetNodeRadiusByID(id)` / `GetNodeRadiusByIndex(index)`
-- `TrackNodePositionsByIDs(ids)` / `TrackNodePositionsByIndices(...)` / `GetTrackedNodePositionsMap()`
-- `GetSampledNodePositionsMap()`
-- `DisableZoom()` / `EnableZoom()`
-- `UpdateNodeColor()`, `UpdateNodeSize()`, `UpdateLinkColor()`, `UpdateLinkWidth()`, `UpdateLinkArrows()`, `UpdateCurveLineGeometry()`, `UpdateBackgroundColor()` — re-apply config/data-derived buffers after mutating `Config()` or the data in place (the Go equivalent of `setConfig` diffing)
+- `New(div js.Value, cfg *Config) (*Graph, error)`, `Render(alpha ...float64)`, `Destroy()`
+- Simulation: `Start(alpha ...float64)`, `Stop()`, `Pause()`, `Unpause()`, `Step()`, `Progress()`, `IsSimulationRunning()`
+- View: `Zoom` / `SetZoomLevel` / `GetZoomLevel`, `FitView`, `FitViewByPointIndices`, `FitViewByPointPositions`, `ZoomToPointByIndex`
+- Readback: `GetPointPositions()`, `GetClusterPositions()`, `TrackPointPositionsByIndices` + `GetTrackedPointPositionsMap/Array`, `GetSampledPoints()`
+- Selection: `GetPointsInRect`, `GetPointsInPolygon`, `SelectPointsInRect`, `SelectPointsInPolygon`, `SelectPointByIndex`, `SelectPointsByIndices`, `UnselectPoints`, `GetSelectedIndices`
+- Misc: `GetAdjacentIndices`, `SetFocusedPointByIndex`, `SpaceToScreenPosition`, `ScreenToSpacePosition`, `SpaceToScreenRadius`, `GetPointRadiusByIndex`, `EnableZoom()` / `DisableZoom()`
 
-Interactions match the original: drag to pan, mouse wheel to zoom, double-click to zoom in (shift + double-click to zoom out), hold the right mouse button to repel nodes with the mouse force.
+Interactions match the original: drag to pan, mouse wheel to zoom, double-click to zoom in (shift + double-click to zoom out), drag points with the mouse when `EnableDrag` is set (hold Space to pan instead), and hold the right mouse button to repel points when `EnableRightClickRepulsion` is set.
 
-### Differences from cosmos.js
+### Differences from cosmos.gl
 
-- Per-node/per-link fields replace the accessor-function idiom (see Data model above)
-- `Config` is a plain struct created by `NewConfig()`; instead of `setConfig` diffing, call the matching `Update*` method after changing visual parameters (simulation parameters are read live every frame)
+- `Config` is a plain struct created by `NewConfig()`; instead of `setConfig` diffing, mutate fields directly — simulation and interaction parameters are read live every frame, while data-derived defaults are re-applied by the corresponding setter or `Render()`
+- "Unset" optional values use Go sentinels: `-1` for indices and `PointGreyoutOpacity`, `""` for optional colors, `-1` in `SetPointClusters`, negative coordinates in `SetClusterPositions`
+- `Attribution` renders as plain text (the original sanitizes and injects HTML)
 - The FPS monitor is a small built-in overlay instead of the `gl-bench` dependency
 - The random jitter PRNG is deterministic per `RandomSeed` but produces a different sequence than the JS `random` package, so layouts are reproducible within cosmos-go but not pixel-identical to cosmos.js runs
-- `renderHighlightedNodeRing` / `highlightedNodeRingColor` (deprecated in 1.6) are omitted; use `RenderHoveredNodeRing` / `HoveredNodeRingColor` / `FocusedNodeRingColor`
 
 ### Known Issues
 
 Inherited from the original: starting from version 15.4, iOS has stopped supporting the key WebGL extension powering the Many-Body force implementation (`EXT_float_blend`).
 
+### History
+
+The initial release of cosmos-go (tag `v1-port`) was a port of @cosmograph/cosmos 1.6.1, which is licensed CC-BY-NC-4.0 (non-commercial). The current version is a re-port of the MIT-licensed cosmos.gl 2.6.3 line and carries the MIT license. A port of the cosmos.gl 3.x line (which moved from regl/WebGL1 to luma.gl/WebGL2) may follow as future work.
+
 ### License
 
-CC-BY-NC-4.0, same as the ported cosmos 1.6.1 source (see LICENCE).
+MIT, same as the ported cosmos.gl 2.6.3 source (see LICENCE).
 
-cosmos-go is adapted material derived from [Cosmos](https://github.com/cosmograph-org/cosmos) by the cosmograph-org team, © cosmograph.app. Like the original, it is free for non-commercial usage; for commercial use please [reach out to the Cosmos authors](mailto:hi@cosmograph.app). Note that Cosmos 2.x (cosmos.gl) has since been relicensed under MIT — a future re-port based on the 2.x codebase could carry the MIT license.
+cosmos-go is derived from [cosmos.gl](https://github.com/cosmograph-org/cosmos) — © Contributors to the cosmos.gl project, created by the [Cosmograph](https://cosmograph.app) team.

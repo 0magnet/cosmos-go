@@ -19,6 +19,7 @@ type forceLink struct {
 	randomDistanceFbo            *framebuffer
 	maxPointDegree               int
 	runCommand                   *command
+	lastMaxLinks                 int
 }
 
 func newForceLink() *forceLink { return &forceLink{} }
@@ -33,27 +34,39 @@ func (f *forceLink) create(ctx *glCtx, st *store, data *graphData, direction lin
 	linkBiasAndStrengthState := make([]float32, linksTextureSize*linksTextureSize*4)
 	linkDistanceState := make([]float32, linksTextureSize*linksTextureSize*4)
 
-	grouped := data.groupedSourceToTarget
-	keys := data.groupedSourceKeys
+	grouped := data.sourceIndexToTargetIndices
 	if direction == linkOutgoing {
-		grouped = data.groupedTargetToSource
-		keys = data.groupedTargetKeys
+		grouped = data.targetIndexToSourceIndices
 	}
 	f.maxPointDegree = 0
 	linkIndex := 0
-	for _, nodeIndex := range keys {
-		connectedNodeIndices := grouped[nodeIndex]
-		linkFirstIndicesAndAmount[nodeIndex*4+0] = float32(linkIndex % linksTextureSize)
-		linkFirstIndicesAndAmount[nodeIndex*4+1] = float32(linkIndex / linksTextureSize)
-		linkFirstIndicesAndAmount[nodeIndex*4+2] = float32(len(connectedNodeIndices))
+	for pointIndex, connectedPointIndices := range grouped {
+		if len(connectedPointIndices) == 0 {
+			continue
+		}
+		linkFirstIndicesAndAmount[pointIndex*4+0] = float32(linkIndex % linksTextureSize)
+		linkFirstIndicesAndAmount[pointIndex*4+1] = float32(linkIndex / linksTextureSize)
+		linkFirstIndicesAndAmount[pointIndex*4+2] = float32(len(connectedPointIndices))
 
-		for _, connectedNodeIndex := range connectedNodeIndices {
-			indices[linkIndex*4+0] = float32(connectedNodeIndex % pointsTextureSize)
-			indices[linkIndex*4+1] = float32(connectedNodeIndex / pointsTextureSize)
-			degree := data.degree[data.getInputIndexBySortedIndex(connectedNodeIndex)]
-			connectedDegree := data.degree[data.getInputIndexBySortedIndex(nodeIndex)]
-			bias := float64(degree) / float64(degree+connectedDegree)
-			strength := 1 / math.Min(float64(degree), float64(connectedDegree))
+		for _, pair := range connectedPointIndices {
+			connectedPointIndex := pair.pointIndex
+			initialLinkIndex := pair.linkIndex
+			indices[linkIndex*4+0] = float32(connectedPointIndex % pointsTextureSize)
+			indices[linkIndex*4+1] = float32(connectedPointIndex / pointsTextureSize)
+			degree := data.degree[connectedPointIndex]
+			connectedDegree := data.degree[pointIndex]
+			degreeSum := degree + connectedDegree
+			bias := 0.5
+			if degreeSum != 0 {
+				bias = float64(degree) / float64(degreeSum)
+			}
+			minDegree := math.Min(float64(degree), float64(connectedDegree))
+			var strength float64
+			if data.linkStrength != nil && initialLinkIndex < len(data.linkStrength) {
+				strength = float64(data.linkStrength[initialLinkIndex])
+			} else {
+				strength = 1 / math.Max(minDegree, 1)
+			}
 			strength = math.Sqrt(strength)
 			linkBiasAndStrengthState[linkIndex*4+0] = float32(bias)
 			linkBiasAndStrengthState[linkIndex*4+1] = float32(strength)
@@ -62,22 +75,31 @@ func (f *forceLink) create(ctx *glCtx, st *store, data *graphData, direction lin
 			linkIndex++
 		}
 
-		if len(connectedNodeIndices) > f.maxPointDegree {
-			f.maxPointDegree = len(connectedNodeIndices)
+		if len(connectedPointIndices) > f.maxPointDegree {
+			f.maxPointDegree = len(connectedPointIndices)
 		}
 	}
 
+	f.linkFirstIndicesAndAmountFbo.destroy()
 	f.linkFirstIndicesAndAmountFbo = ctx.newFramebuffer(pointsTextureSize, pointsTextureSize, linkFirstIndicesAndAmount)
+	f.indicesFbo.destroy()
 	f.indicesFbo = ctx.newFramebuffer(linksTextureSize, linksTextureSize, indices)
+	f.biasAndStrengthFbo.destroy()
 	f.biasAndStrengthFbo = ctx.newFramebuffer(linksTextureSize, linksTextureSize, linkBiasAndStrengthState)
+	f.randomDistanceFbo.destroy()
 	f.randomDistanceFbo = ctx.newFramebuffer(linksTextureSize, linksTextureSize, linkDistanceState)
 }
 
 func (f *forceLink) initPrograms(ctx *glCtx, cfg *Config, st *store, pts *points, quadAttr []attrBinding) error {
+	// the shader depends on maxPointDegree; recompile when it grows
+	if f.runCommand != nil && f.lastMaxLinks == f.maxPointDegree {
+		return nil
+	}
 	prog, err := ctx.program(quadVert, forceSpringFrag(f.maxPointDegree))
 	if err != nil {
 		return err
 	}
+	f.lastMaxLinks = f.maxPointDegree
 	f.runCommand = &command{
 		ctx: ctx, prog: prog,
 		fbo:       func() *framebuffer { return pts.velocityFbo },
@@ -85,16 +107,16 @@ func (f *forceLink) initPrograms(ctx *glCtx, cfg *Config, st *store, pts *points
 		count:     func() int { return 4 },
 		attrs:     quadAttr,
 		uniforms: map[string]func() uniformValue{
-			"position":     func() uniformValue { return pts.previousPositionFbo },
-			"linkSpring":   func() uniformValue { return cfg.Simulation.LinkSpring },
-			"linkDistance": func() uniformValue { return cfg.Simulation.LinkDistance },
+			"positionsTexture": func() uniformValue { return pts.previousPositionFbo },
+			"linkSpring":       func() uniformValue { return cfg.SimulationLinkSpring },
+			"linkDistance":     func() uniformValue { return cfg.SimulationLinkDistance },
 			"linkDistRandomVariationRange": func() uniformValue {
-				return cfg.Simulation.LinkDistRandomVariationRange[:]
+				return cfg.SimulationLinkDistRandomVariationRange[:]
 			},
-			"linkFirstIndicesAndAmount": func() uniformValue { return f.linkFirstIndicesAndAmountFbo },
-			"linkIndices":               func() uniformValue { return f.indicesFbo },
-			"linkBiasAndStrength":       func() uniformValue { return f.biasAndStrengthFbo },
-			"linkRandomDistanceFbo":     func() uniformValue { return f.randomDistanceFbo },
+			"linkInfoTexture":           func() uniformValue { return f.linkFirstIndicesAndAmountFbo },
+			"linkIndicesTexture":        func() uniformValue { return f.indicesFbo },
+			"linkPropertiesTexture":     func() uniformValue { return f.biasAndStrengthFbo },
+			"linkRandomDistanceTexture": func() uniformValue { return f.randomDistanceFbo },
 			"pointsTextureSize":         func() uniformValue { return float64(st.pointsTextureSize) },
 			"linksTextureSize":          func() uniformValue { return float64(st.linksTextureSize) },
 			"alpha":                     func() uniformValue { return st.alpha },

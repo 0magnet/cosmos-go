@@ -1,7 +1,7 @@
 //go:build js && wasm
 
-// Package cosmos is a Go/WebAssembly port of @cosmograph/cosmos 1.6.1
-// (https://github.com/cosmograph-org/cosmos), a GPU-accelerated
+// Package cosmos is a Go/WebAssembly port of cosmos.gl 2.6.3
+// (https://github.com/cosmograph-org/cosmos, MIT), the GPU-accelerated
 // force-directed graph layout and rendering library. Both the force
 // simulation and the rendering run on the GPU in WebGL shaders (carried
 // over verbatim from the original); this package drives them through
@@ -18,12 +18,14 @@ import (
 type Graph struct {
 	cfg    *Config
 	data   *graphData
+	div    js.Value
 	canvas js.Value
 	ctx    *glCtx
 
-	st     *store
-	points *points
-	lines  *lines
+	st       *store
+	points   *points
+	lines    *lines
+	clusters *clusters
 
 	forceGravity      *forceGravity
 	forceCenter       *forceCenter
@@ -34,47 +36,64 @@ type Graph struct {
 	zoom              *zoomState
 	fps               *fpsMonitor
 
-	rafID                      js.Value
-	rafCb                      js.Func
-	isRightClickMouse          bool
-	hasParticleSystemDestroyed bool
-	currentEvent               js.Value
+	rafID             js.Value
+	rafCb             js.Func
+	framesRunning     bool
+	isRightClickMouse bool
+	currentEvent      js.Value
 
-	findHoveredPointExecutionCount int
-	isMouseOnCanvas                bool
-	isFirstDataAfterInit           bool
-	fitViewOnInitTimeoutID         js.Value
+	findHoveredItemExecutionCount int
+	isMouseOnCanvas               bool
+	isFirstRenderAfterInit        bool
+	fitViewOnInitTimeoutID        js.Value
+
+	isPointPositionsUpdateNeeded    bool
+	isPointColorUpdateNeeded        bool
+	isPointSizeUpdateNeeded         bool
+	isPointShapeUpdateNeeded        bool
+	isPointImageIndicesUpdateNeeded bool
+	isPointImageSizesUpdateNeeded   bool
+	isLinksUpdateNeeded             bool
+	isLinkColorUpdateNeeded         bool
+	isLinkWidthUpdateNeeded         bool
+	isLinkArrowUpdateNeeded         bool
+	isPointClusterUpdateNeeded      bool
+	isForceManyBodyUpdateNeeded     bool
+	isForceLinkUpdateNeeded         bool
+	isForceCenterUpdateNeeded       bool
+
+	isDestroyed bool
 
 	funcs []js.Func
 }
 
-// New creates a cosmos Graph on the given canvas element. A nil config
-// uses the defaults.
-func New(canvas js.Value, cfg *Config) (*Graph, error) {
+// New creates a cosmos Graph inside the given container element (a div).
+// A nil config uses the defaults.
+func New(div js.Value, cfg *Config) (*Graph, error) {
 	if cfg == nil {
 		cfg = NewConfig()
 	}
 	g := &Graph{
-		cfg:                  cfg,
-		data:                 newGraphData(),
-		canvas:               canvas,
-		st:                   newStore(),
-		isFirstDataAfterInit: true,
+		cfg:                    cfg,
+		data:                   newGraphData(cfg),
+		div:                    div,
+		st:                     newStore(),
+		isFirstRenderAfterInit: true,
 	}
+
+	document := js.Global().Get("document")
+	canvas := document.Call("createElement", "canvas")
+	style := canvas.Get("style")
+	style.Call("setProperty", "width", "100%")
+	style.Call("setProperty", "height", "100%")
+	div.Call("appendChild", canvas)
+	g.addAttribution()
 
 	w := canvas.Get("clientWidth").Float()
 	h := canvas.Get("clientHeight").Float()
-
 	canvas.Set("width", w*cfg.PixelRatio)
 	canvas.Set("height", h*cfg.PixelRatio)
-	// If the canvas element has no CSS width and height style, clientWidth /
-	// clientHeight will always equal the width/height attributes; assume a
-	// canvas CSS size of 100% to prevent resize feedback loops.
-	style := canvas.Get("style")
-	if style.Get("width").String() == "" && style.Get("height").String() == "" {
-		style.Call("setProperty", "width", "100%")
-		style.Call("setProperty", "height", "100%")
-	}
+	g.canvas = canvas
 
 	ctx, err := newGLCtx(canvas)
 	if err != nil {
@@ -82,16 +101,15 @@ func New(canvas js.Value, cfg *Config) (*Graph, error) {
 	}
 	g.ctx = ctx
 
-	g.st.maxPointSize = ctx.maxPointSize / cfg.PixelRatio
 	g.st.adjustSpaceSize(cfg.SpaceSize, ctx.maxTextureSize)
+	g.st.webglMaxTextureSize = ctx.maxTextureSize
 	g.st.updateScreenSize(w, h)
 
 	g.zoom = newZoomState(g.st, cfg)
 	g.zoom.onStart = func(sourceEvent js.Value) {
 		g.currentEvent = sourceEvent
-		userDriven := sourceEvent.Truthy()
-		if cfg.Events.OnZoomStart != nil {
-			cfg.Events.OnZoomStart(userDriven)
+		if cfg.OnZoomStart != nil {
+			cfg.OnZoomStart(sourceEvent.Truthy())
 		}
 	}
 	g.zoom.onZoom = func(sourceEvent js.Value) {
@@ -100,19 +118,46 @@ func New(canvas js.Value, cfg *Config) (*Graph, error) {
 			g.updateMousePosition(sourceEvent)
 		}
 		g.currentEvent = sourceEvent
-		if cfg.Events.OnZoom != nil {
-			cfg.Events.OnZoom(userDriven)
+		if cfg.OnZoom != nil {
+			cfg.OnZoom(userDriven)
 		}
 	}
 	g.zoom.onEnd = func(sourceEvent js.Value) {
 		g.currentEvent = sourceEvent
-		userDriven := sourceEvent.Truthy()
-		if cfg.Events.OnZoomEnd != nil {
-			cfg.Events.OnZoomEnd(userDriven)
+		if cfg.OnZoomEnd != nil {
+			cfg.OnZoomEnd(sourceEvent.Truthy())
+		}
+	}
+	g.zoom.dragSubject = func() bool {
+		return g.st.hoveredPoint != nil && !g.st.isSpaceKeyPressed
+	}
+	g.zoom.onDragStart = func(event js.Value) {
+		if g.st.hoveredPoint != nil {
+			g.st.draggingPointIndex = g.st.hoveredPoint.index
+		}
+		g.currentEvent = event
+		g.updateCanvasCursor()
+		if cfg.OnDragStart != nil {
+			cfg.OnDragStart(event)
+		}
+	}
+	g.zoom.onDrag = func(event js.Value) {
+		g.updateMousePosition(event)
+		g.currentEvent = event
+		if cfg.OnDrag != nil {
+			cfg.OnDrag(event)
+		}
+	}
+	g.zoom.onDragEnd = func(event js.Value) {
+		g.st.draggingPointIndex = -1
+		g.currentEvent = event
+		g.updateCanvasCursor()
+		if cfg.OnDragEnd != nil {
+			cfg.OnDragEnd(event)
 		}
 	}
 	g.zoom.attach(canvas)
-	if cfg.DisableZoom {
+	if !cfg.EnableZoom {
 		g.zoom.wheelEnabled = false
 	}
 	initialZoom := cfg.InitialZoomLevel
@@ -122,17 +167,45 @@ func New(canvas js.Value, cfg *Config) (*Graph, error) {
 	g.zoom.scaleTo(initialZoom, 0)
 
 	g.listen(canvas, "mouseenter", func(js.Value) { g.isMouseOnCanvas = true })
-	g.listen(canvas, "mouseleave", func(js.Value) { g.isMouseOnCanvas = false })
+	g.listen(canvas, "mouseleave", func(event js.Value) {
+		g.isMouseOnCanvas = false
+		g.currentEvent = event
+		if g.st.hoveredPoint != nil && cfg.OnPointMouseOut != nil {
+			cfg.OnPointMouseOut(event)
+		}
+		if g.st.hoveredLinkIndex >= 0 && cfg.OnLinkMouseOut != nil {
+			cfg.OnLinkMouseOut(event)
+		}
+		g.isRightClickMouse = false
+		g.st.hoveredPoint = nil
+		g.st.hoveredLinkIndex = -1
+		g.updateCanvasCursor()
+	})
 	g.listen(canvas, "click", g.onClick)
 	g.listen(canvas, "mousemove", g.onMouseMove)
 	g.listen(canvas, "contextmenu", func(event js.Value) { event.Call("preventDefault") })
+	g.listen(document, "keydown", func(event js.Value) {
+		if event.Get("code").String() == "Space" {
+			g.st.isSpaceKeyPressed = true
+		}
+	})
+	g.listen(document, "keyup", func(event js.Value) {
+		if event.Get("code").String() == "Space" {
+			g.st.isSpaceKeyPressed = false
+		}
+	})
+
+	g.st.maxPointSize = ctx.maxPointSize / cfg.PixelRatio
+
+	// initialize simulation state based on EnableSimulation
+	g.st.isSimulationRunning = cfg.EnableSimulation
 
 	g.points = newPoints(ctx, cfg, g.st, g.data)
 	g.lines = newLines(ctx, cfg, g.st, g.data, g.points)
-	if !cfg.DisableSimulation {
+	if cfg.EnableSimulation {
 		g.forceGravity = newForceGravity()
 		g.forceCenter = newForceCenter()
-		if cfg.UseQuadtree {
+		if cfg.UseClassicQuadtree {
 			g.forceManyBody = newForceManyBodyQuadtree()
 		} else {
 			g.forceManyBody = newForceManyBody()
@@ -141,19 +214,21 @@ func New(canvas js.Value, cfg *Config) (*Graph, error) {
 		g.forceLinkOutgoing = newForceLink()
 		g.forceMouse = newForceMouse()
 	}
+	g.clusters = newClusters(ctx, cfg, g.st, g.data, g.points)
 
-	g.st.backgroundColor = parseRGBA(cfg.BackgroundColor)
-	if cfg.HoveredNodeRingColor != "" {
-		g.st.setHoveredNodeRingColor(cfg.HoveredNodeRingColor)
+	g.st.setBackgroundColor(parseRGBA(cfg.BackgroundColor))
+	g.st.setHoveredPointRingColor(cfg.HoveredPointRingColor)
+	g.st.setFocusedPointRingColor(cfg.FocusedPointRingColor)
+	if cfg.FocusedPointIndex >= 0 {
+		g.st.focusedPointIndex = cfg.FocusedPointIndex
 	}
-	if cfg.FocusedNodeRingColor != "" {
-		g.st.setFocusedNodeRingColor(cfg.FocusedNodeRingColor)
-	}
+	g.st.setGreyoutPointColor(cfg.PointGreyoutColor)
+	g.st.setHoveredLinkColor(cfg.HoveredLinkColor)
+	g.st.updateLinkHoveringEnabled(cfg)
 
 	if cfg.ShowFPSMonitor {
 		g.fps = newFPSMonitor(canvas)
 	}
-
 	if cfg.RandomSeed != "" {
 		g.st.addRandomSeed(cfg.RandomSeed)
 	}
@@ -192,83 +267,227 @@ func (g *Graph) IsSimulationRunning() bool { return g.st.isSimulationRunning }
 // MaxPointSize is the maximum gl.POINTS size the hardware can render.
 func (g *Graph) MaxPointSize() float64 { return g.st.maxPointSize }
 
-// Config returns the active configuration. Mutating returned values takes
-// effect on the next frame for most rendering parameters; structural
-// parameters (colors, sizes, widths, curve geometry) need the matching
-// Update* method or SetData to be re-applied.
+// Config returns the active configuration. Simulation parameters and most
+// rendering parameters are read live every frame; data-derived parameters
+// (default colors/sizes/widths/arrows, curve geometry) need the matching
+// Update* method to be re-applied.
 func (g *Graph) Config() *Config { return g.cfg }
 
-// UpdateNodeColor re-applies node colors from the config and node data.
-func (g *Graph) UpdateNodeColor() { g.points.updateColor() }
+// SetPointPositions sets the point positions as [x1, y1, x2, y2, ...].
+// Pass dontRescale to skip position rescaling for this call only.
+func (g *Graph) SetPointPositions(pointPositions []float32, dontRescale ...bool) {
+	if g.isDestroyed {
+		return
+	}
+	g.data.inputPointPositions = pointPositions
+	g.points.hasSkipRescale = len(dontRescale) > 0
+	g.points.shouldSkipRescale = len(dontRescale) > 0 && dontRescale[0]
+	g.isPointPositionsUpdateNeeded = true
+	g.isLinksUpdateNeeded = true
+	g.isPointColorUpdateNeeded = true
+	g.isPointSizeUpdateNeeded = true
+	g.isPointShapeUpdateNeeded = true
+	g.isPointImageIndicesUpdateNeeded = true
+	g.isPointImageSizesUpdateNeeded = true
+	g.isPointClusterUpdateNeeded = true
+	g.isForceManyBodyUpdateNeeded = true
+	g.isForceLinkUpdateNeeded = true
+	g.isForceCenterUpdateNeeded = true
+}
 
-// UpdateNodeSize re-applies node sizes from the config and node data.
-func (g *Graph) UpdateNodeSize() { g.points.updateSize() }
+// SetPointColors sets the point colors as [r, g, b, a, ...] with RGB
+// components 0..255 and alpha 0..1.
+func (g *Graph) SetPointColors(pointColors []float32) {
+	g.data.inputPointColors = pointColors
+	g.isPointColorUpdateNeeded = true
+}
 
-// UpdateLinkColor re-applies link colors from the config and link data.
-func (g *Graph) UpdateLinkColor() { g.lines.updateColor() }
+// GetPointColors returns the current point colors (normalized 0..1 RGBA).
+func (g *Graph) GetPointColors() []float32 { return g.data.pointColors }
 
-// UpdateLinkWidth re-applies link widths from the config and link data.
-func (g *Graph) UpdateLinkWidth() { g.lines.updateWidth() }
+// SetPointSizes sets the point sizes as [size1, size2, ...].
+func (g *Graph) SetPointSizes(pointSizes []float32) {
+	g.data.inputPointSizes = pointSizes
+	g.isPointSizeUpdateNeeded = true
+}
 
-// UpdateLinkArrows re-applies link arrow settings.
-func (g *Graph) UpdateLinkArrows() { g.lines.updateArrow() }
+// GetPointSizes returns the current point sizes.
+func (g *Graph) GetPointSizes() []float32 { return g.data.pointSizes }
 
-// UpdateCurveLineGeometry re-applies the curved link geometry settings.
-func (g *Graph) UpdateCurveLineGeometry() { g.lines.updateCurveLineGeometry() }
+// SetPointShapes sets the point shapes (see the Shape* constants).
+func (g *Graph) SetPointShapes(pointShapes []float32) {
+	g.data.inputPointShapes = pointShapes
+	g.isPointShapeUpdateNeeded = true
+}
 
-// UpdateBackgroundColor re-applies Config.BackgroundColor.
-func (g *Graph) UpdateBackgroundColor() { g.st.backgroundColor = parseRGBA(g.cfg.BackgroundColor) }
+// SetImageData sets point images from an array of JS ImageData objects.
+func (g *Graph) SetImageData(imageData []js.Value) {
+	if g.isDestroyed {
+		return
+	}
+	g.points.createAtlas(imageData)
+}
 
-// SetData passes the graph data. When runSimulation is false the
-// simulation won't be started automatically.
-func (g *Graph) SetData(nodes []Node, links []Link, runSimulation bool) {
-	if len(nodes) == 0 && len(links) == 0 {
-		g.destroyParticleSystem()
+// SetPointImageIndices sets which image each point uses (-1 = none).
+func (g *Graph) SetPointImageIndices(imageIndices []float32) {
+	g.data.inputPointImageIndices = imageIndices
+	g.isPointImageIndicesUpdateNeeded = true
+}
+
+// SetPointImageSizes sets the sizes of the point images.
+func (g *Graph) SetPointImageSizes(imageSizes []float32) {
+	g.data.inputPointImageSizes = imageSizes
+	g.isPointImageSizesUpdateNeeded = true
+}
+
+// SetLinks sets the links as [source1, target1, source2, target2, ...]
+// point indices.
+func (g *Graph) SetLinks(links []float32) {
+	g.data.inputLinks = links
+	g.isLinksUpdateNeeded = true
+	g.isLinkColorUpdateNeeded = true
+	g.isLinkWidthUpdateNeeded = true
+	g.isLinkArrowUpdateNeeded = true
+	g.isForceLinkUpdateNeeded = true
+}
+
+// SetLinkColors sets the link colors as [r, g, b, a, ...] with RGB
+// components 0..255 and alpha 0..1.
+func (g *Graph) SetLinkColors(linkColors []float32) {
+	g.data.inputLinkColors = linkColors
+	g.isLinkColorUpdateNeeded = true
+}
+
+// GetLinkColors returns the current link colors (normalized 0..1 RGBA).
+func (g *Graph) GetLinkColors() []float32 { return g.data.linkColors }
+
+// SetLinkWidths sets the link widths.
+func (g *Graph) SetLinkWidths(linkWidths []float32) {
+	g.data.inputLinkWidths = linkWidths
+	g.isLinkWidthUpdateNeeded = true
+}
+
+// GetLinkWidths returns the current link widths.
+func (g *Graph) GetLinkWidths() []float32 { return g.data.linkWidths }
+
+// SetLinkArrows sets whether each link has an arrow.
+func (g *Graph) SetLinkArrows(linkArrows []bool) {
+	g.data.linkArrowsBool = linkArrows
+	g.isLinkArrowUpdateNeeded = true
+}
+
+// SetLinkStrength sets the per-link spring strength.
+func (g *Graph) SetLinkStrength(linkStrength []float32) {
+	g.data.inputLinkStrength = linkStrength
+	g.isForceLinkUpdateNeeded = true
+}
+
+// SetPointClusters maps points to cluster indices (-1 = no cluster).
+func (g *Graph) SetPointClusters(pointClusters []int) {
+	g.data.inputPointClusters = pointClusters
+	g.isPointClusterUpdateNeeded = true
+}
+
+// SetClusterPositions sets fixed cluster positions as [x1, y1, ...]
+// (negative coordinates = position the cluster at its center of mass).
+func (g *Graph) SetClusterPositions(clusterPositions []float32) {
+	g.data.inputClusterPositions = clusterPositions
+	g.isPointClusterUpdateNeeded = true
+}
+
+// SetPointClusterStrength sets per-point cluster force coefficients.
+func (g *Graph) SetPointClusterStrength(clusterStrength []float32) {
+	g.data.inputClusterStrength = clusterStrength
+	g.isPointClusterUpdateNeeded = true
+}
+
+// SetPinnedPoints sets which points are pinned (fixed) in position.
+// Pass nil or an empty slice to unpin all points.
+func (g *Graph) SetPinnedPoints(pinnedIndices []int) {
+	if g.isDestroyed {
+		return
+	}
+	if len(pinnedIndices) == 0 {
+		g.data.inputPinnedPoints = nil
+	} else {
+		g.data.inputPinnedPoints = pinnedIndices
+	}
+	g.points.updatePinnedStatus()
+}
+
+// Render renders the graph and starts the render loop. The optional alpha
+// sets the simulation energy (0 stops after one frame; omitted keeps the
+// current value).
+func (g *Graph) Render(simulationAlpha ...float64) {
+	if g.isDestroyed {
+		return
+	}
+	g.data.update()
+	if g.data.pointsNumber() == 0 && g.data.linksNumber() == 0 {
+		g.stopFrames()
 		bg := g.st.backgroundColor
 		g.ctx.clearTarget(nil, bg[0], bg[1], bg[2], bg[3])
 		return
 	}
-	g.data.setData(nodes, links)
+
 	// if InitialZoomLevel is set there is no need to fit the view
-	if g.isFirstDataAfterInit && g.cfg.FitViewOnInit && g.cfg.InitialZoomLevel == 0 {
+	if g.isFirstRenderAfterInit && g.cfg.FitViewOnInit && g.cfg.InitialZoomLevel == 0 {
 		g.fitViewOnInitTimeoutID = setTimeout(func() {
-			if g.cfg.FitViewByNodesInRect != nil {
-				positions := make([][2]float64, len(g.cfg.FitViewByNodesInRect))
-				copy(positions, g.cfg.FitViewByNodesInRect)
-				g.setZoomTransformByNodePositions(positions, 0, math.NaN(), 0.1)
+			if g.cfg.FitViewByPointIndices != nil {
+				g.FitViewByPointIndices(g.cfg.FitViewByPointIndices, g.cfg.FitViewDuration, g.cfg.FitViewPadding)
+			} else if g.cfg.FitViewByPointsInRect != nil {
+				positions := make([]float64, 0, len(g.cfg.FitViewByPointsInRect)*2)
+				for _, p := range g.cfg.FitViewByPointsInRect {
+					positions = append(positions, p[0], p[1])
+				}
+				g.setZoomTransformByPointPositions(positions, g.cfg.FitViewDuration, math.NaN(), g.cfg.FitViewPadding)
 			} else {
-				g.FitView(250, 0.1)
+				g.FitView(g.cfg.FitViewDuration, g.cfg.FitViewPadding)
 			}
 		}, g.cfg.FitViewDelay)
 	}
-	g.isFirstDataAfterInit = false
+	alpha := g.st.alpha
+	if len(simulationAlpha) > 0 {
+		alpha = simulationAlpha[0]
+	}
+	g.update(alpha)
+	g.startFrames()
 
-	g.update(runSimulation)
+	g.isFirstRenderAfterInit = false
 }
 
-// ZoomToNodeByID centers the view on a node and zooms in.
-// Defaults: duration 700ms, scale 3, canZoomOut true.
-func (g *Graph) ZoomToNodeByID(id string, duration float64, scale float64, canZoomOut bool) {
-	node := g.data.getNodeByID(id)
-	if node == nil {
+// ZoomToPointByIndex centers the view on a point and zooms in.
+// Defaults matching the original: duration 700, scale 3, canZoomOut true.
+func (g *Graph) ZoomToPointByIndex(index int, duration float64, scale float64, canZoomOut bool) {
+	if g.isDestroyed || index < 0 {
 		return
 	}
-	g.zoomToNode(node, duration, scale, canZoomOut)
-}
-
-// ZoomToNodeByIndex centers the view on a node by index and zooms in.
-func (g *Graph) ZoomToNodeByIndex(index int, duration float64, scale float64, canZoomOut bool) {
-	node := g.data.getNodeByIndex(index)
-	if node == nil {
+	pixels := g.points.currentPositionFbo.readPixels()
+	if index*4+1 >= len(pixels) {
 		return
 	}
-	g.zoomToNode(node, duration, scale, canZoomOut)
+	posX := float64(pixels[index*4])
+	posY := float64(pixels[index*4+1])
+	distance := g.zoom.getDistanceToPoint([2]float64{posX, posY})
+	zoomLevel := scale
+	if !canZoomOut {
+		zoomLevel = math.Max(g.GetZoomLevel(), scale)
+	}
+	if distance < math.Min(g.st.screenSize[0], g.st.screenSize[1]) {
+		g.setZoomTransformByPointPositions([]float64{posX, posY}, duration, zoomLevel, 0.1)
+	} else {
+		transform := g.zoom.getTransform([][2]float64{{posX, posY}}, zoomLevel, true, 0.1)
+		middle := g.zoom.getMiddlePointTransform([2]float64{posX, posY})
+		g.zoom.transformChain(
+			[]zoomTransform{middle, transform},
+			[]float64{duration / 2, duration / 2},
+			[]func(float64) float64{easeQuadIn, easeQuadOut},
+		)
+	}
 }
 
 // Zoom zooms the view to the given zoom level.
-func (g *Graph) Zoom(value float64, duration float64) {
-	g.SetZoomLevel(value, duration)
-}
+func (g *Graph) Zoom(value float64, duration float64) { g.SetZoomLevel(value, duration) }
 
 // SetZoomLevel zooms the view to the given zoom level.
 func (g *Graph) SetZoomLevel(value float64, duration float64) {
@@ -278,75 +497,116 @@ func (g *Graph) SetZoomLevel(value float64, duration float64) {
 // GetZoomLevel returns the zoom level of the view.
 func (g *Graph) GetZoomLevel() float64 { return g.zoom.eventTransform.k }
 
-// GetNodePositions returns the current X and Y coordinates of all nodes,
-// keyed by node id.
-func (g *Graph) GetNodePositions() map[string][2]float64 {
-	result := map[string][2]float64{}
-	if g.hasParticleSystemDestroyed {
-		return result
-	}
-	pixels := g.points.currentPositionFbo.readPixels()
-	for i := range g.data.nodes {
-		index := g.data.getSortedIndexByInputIndex(i)
-		if index >= 0 && index*4+1 < len(pixels) {
-			result[g.data.nodes[i].ID] = [2]float64{float64(pixels[index*4]), float64(pixels[index*4+1])}
-		}
-	}
-	return result
-}
-
-// GetNodePositionsArray returns the coordinates of all nodes in input order.
-func (g *Graph) GetNodePositionsArray() [][2]float64 {
-	if g.hasParticleSystemDestroyed {
+// GetPointPositions returns the current coordinates of all points as
+// [x1, y1, x2, y2, ...].
+func (g *Graph) GetPointPositions() []float64 {
+	if g.isDestroyed || g.data.pointsNumber() == 0 || g.points.currentPositionFbo == nil {
 		return nil
 	}
 	pixels := g.points.currentPositionFbo.readPixels()
-	positions := make([][2]float64, len(g.data.nodes))
-	for i := range g.data.nodes {
-		index := g.data.getSortedIndexByInputIndex(i)
-		if index >= 0 && index*4+1 < len(pixels) {
-			positions[i] = [2]float64{float64(pixels[index*4]), float64(pixels[index*4+1])}
+	n := g.data.pointsNumber()
+	positions := make([]float64, n*2)
+	for i := 0; i < n && i*4+1 < len(pixels); i++ {
+		positions[i*2] = float64(pixels[i*4])
+		positions[i*2+1] = float64(pixels[i*4+1])
+	}
+	return positions
+}
+
+// GetClusterPositions returns the current coordinates of the clusters as
+// [x1, y1, x2, y2, ...].
+func (g *Graph) GetClusterPositions() []float64 {
+	if g.isDestroyed || g.data.pointClusters == nil || !g.clusters.created {
+		return nil
+	}
+	g.clusters.calculateCentermass()
+	pixels := g.clusters.centermassFbo.readPixels()
+	positions := make([]float64, g.clusters.clusterCount*2)
+	for i := 0; i < g.clusters.clusterCount && i*4+2 < len(pixels); i++ {
+		sumX := float64(pixels[i*4])
+		sumY := float64(pixels[i*4+1])
+		sumN := float64(pixels[i*4+2])
+		if sumN != 0 {
+			positions[i*2] = sumX / sumN
+			positions[i*2+1] = sumY / sumN
 		}
 	}
 	return positions
 }
 
-// FitView centers and zooms the view to fit all nodes in the scene.
-// Defaults: duration 250ms, padding 0.1.
+// FitView centers and zooms the view to fit all points.
 func (g *Graph) FitView(duration float64, padding float64) {
-	g.setZoomTransformByNodePositions(g.GetNodePositionsArray(), duration, math.NaN(), padding)
+	g.setZoomTransformByPointPositions(g.GetPointPositions(), duration, math.NaN(), padding)
 }
 
-// FitViewByNodeIDs centers and zooms the view to fit the given nodes.
-func (g *Graph) FitViewByNodeIDs(ids []string, duration float64, padding float64) {
-	positionsMap := g.GetNodePositions()
-	var positions [][2]float64
-	for _, id := range ids {
-		if p, ok := positionsMap[id]; ok {
-			positions = append(positions, p)
+// FitViewByPointIndices centers and zooms the view to fit the given points.
+func (g *Graph) FitViewByPointIndices(indices []int, duration float64, padding float64) {
+	positionsArray := g.GetPointPositions()
+	positions := make([]float64, 0, len(indices)*2)
+	for _, index := range indices {
+		if index*2+1 < len(positionsArray) {
+			positions = append(positions, positionsArray[index*2], positionsArray[index*2+1])
 		}
 	}
-	g.setZoomTransformByNodePositions(positions, duration, math.NaN(), padding)
+	g.setZoomTransformByPointPositions(positions, duration, math.NaN(), padding)
 }
 
-// SelectNodesInRange selects nodes inside a rectangular area defined by two
-// corner points [[left, top], [right, bottom]] in screen coordinates.
-// Passing ok=false clears the selection.
-func (g *Graph) SelectNodesInRange(selection [2][2]float64, ok bool) {
+// FitViewByPointPositions centers and zooms the view to fit the given
+// positions [x1, y1, ...].
+func (g *Graph) FitViewByPointPositions(positions []float64, duration float64, padding float64) {
+	g.setZoomTransformByPointPositions(positions, duration, math.NaN(), padding)
+}
+
+// GetPointsInRect returns the indices of points inside a rectangular area
+// [[left, top], [right, bottom]] in screen coordinates.
+func (g *Graph) GetPointsInRect(selection [2][2]float64) []int {
+	if g.isDestroyed || g.points.selectedFbo == nil {
+		return nil
+	}
+	h := g.st.screenSize[1]
+	g.st.selectedArea = [2][2]float64{
+		{selection[0][0], h - selection[1][1]},
+		{selection[1][0], h - selection[0][1]},
+	}
+	g.points.findPointsOnAreaSelection()
+	return g.readSelectedIndices()
+}
+
+// GetPointsInPolygon returns the indices of points inside a polygon area
+// [[x1, y1], [x2, y2], ...] in screen coordinates.
+func (g *Graph) GetPointsInPolygon(polygonPath [][2]float64) []int {
+	if g.isDestroyed || len(polygonPath) < 3 || g.points.selectedFbo == nil {
+		return nil
+	}
+	h := g.st.screenSize[1]
+	converted := make([][2]float64, len(polygonPath))
+	for i, p := range polygonPath {
+		converted[i] = [2]float64{p[0], h - p[1]}
+	}
+	g.points.updatePolygonPath(converted)
+	g.points.findPointsOnPolygonSelection()
+	return g.readSelectedIndices()
+}
+
+func (g *Graph) readSelectedIndices() []int {
+	pixels := g.points.selectedFbo.readPixels()
+	var indices []int
+	for i := 0; i < len(pixels); i += 4 {
+		if pixels[i] != 0 {
+			indices = append(indices, i/4)
+		}
+	}
+	return indices
+}
+
+// SelectPointsInRect selects points inside a rectangular area
+// (ok=false clears the selection).
+func (g *Graph) SelectPointsInRect(selection [2][2]float64, ok bool) {
+	if g.isDestroyed {
+		return
+	}
 	if ok {
-		h := g.st.screenSize[1]
-		g.st.selectedArea = [2][2]float64{
-			{selection[0][0], h - selection[1][1]},
-			{selection[1][0], h - selection[0][1]},
-		}
-		g.points.findPointsOnAreaSelection()
-		pixels := g.points.selectedFbo.readPixels()
-		g.st.selectedIndices = g.st.selectedIndices[:0]
-		for i := 0; i < len(pixels); i += 4 {
-			if pixels[i] != 0 {
-				g.st.selectedIndices = append(g.st.selectedIndices, i/4)
-			}
-		}
+		g.st.selectedIndices = g.GetPointsInRect(selection)
 		g.st.hasSelection = true
 	} else {
 		g.st.selectedIndices = nil
@@ -355,106 +615,67 @@ func (g *Graph) SelectNodesInRange(selection [2][2]float64, ok bool) {
 	g.points.updateGreyoutStatus()
 }
 
-// SelectNodeByID selects a node; optionally its adjacent nodes too.
-func (g *Graph) SelectNodeByID(id string, selectAdjacentNodes bool) {
-	if selectAdjacentNodes {
-		adjacent := g.data.getAdjacentNodes(id)
-		ids := []string{id}
-		for _, n := range adjacent {
-			ids = append(ids, n.ID)
-		}
-		g.SelectNodesByIDs(ids)
-	} else {
-		g.SelectNodesByIDs([]string{id})
+// SelectPointsInPolygon selects points inside a polygon area
+// (nil path clears the selection).
+func (g *Graph) SelectPointsInPolygon(polygonPath [][2]float64) {
+	if g.isDestroyed {
+		return
 	}
-}
-
-// SelectNodeByIndex selects a node by index; optionally adjacent nodes too.
-func (g *Graph) SelectNodeByIndex(index int, selectAdjacentNodes bool) {
-	node := g.data.getNodeByIndex(index)
-	if node != nil {
-		g.SelectNodeByID(node.ID, selectAdjacentNodes)
-	}
-}
-
-// SelectNodesByIDs selects multiple nodes by id (nil clears the selection).
-func (g *Graph) SelectNodesByIDs(ids []string) {
-	if ids == nil {
+	if polygonPath == nil {
 		g.st.selectedIndices = nil
 		g.st.hasSelection = false
 	} else {
-		g.st.selectedIndices = g.st.selectedIndices[:0]
-		for _, id := range ids {
-			if i := g.data.getSortedIndexByID(id); i >= 0 {
-				g.st.selectedIndices = append(g.st.selectedIndices, i)
-			}
+		if len(polygonPath) < 3 {
+			consoleWarn("Polygon path requires at least 3 points to form a polygon.")
+			return
 		}
+		g.st.selectedIndices = g.GetPointsInPolygon(polygonPath)
 		g.st.hasSelection = true
 	}
 	g.points.updateGreyoutStatus()
 }
 
-// SelectNodesByIndices selects multiple nodes by input index (nil clears).
-func (g *Graph) SelectNodesByIndices(indices []int) {
+// SelectPointByIndex selects a point; optionally its adjacent points too.
+func (g *Graph) SelectPointByIndex(index int, selectAdjacentPoints bool) {
+	if selectAdjacentPoints {
+		adjacent := g.data.getAdjacentIndices(index)
+		g.SelectPointsByIndices(append([]int{index}, adjacent...))
+	} else {
+		g.SelectPointsByIndices([]int{index})
+	}
+}
+
+// SelectPointsByIndices selects multiple points (nil clears the selection).
+func (g *Graph) SelectPointsByIndices(indices []int) {
 	if indices == nil {
 		g.st.selectedIndices = nil
 		g.st.hasSelection = false
 	} else {
-		g.st.selectedIndices = g.st.selectedIndices[:0]
-		for _, index := range indices {
-			if i := g.data.getSortedIndexByInputIndex(index); i >= 0 {
-				g.st.selectedIndices = append(g.st.selectedIndices, i)
-			}
-		}
+		g.st.selectedIndices = indices
 		g.st.hasSelection = true
 	}
 	g.points.updateGreyoutStatus()
 }
 
-// UnselectNodes unselects all nodes.
-func (g *Graph) UnselectNodes() {
+// UnselectPoints unselects all points.
+func (g *Graph) UnselectPoints() {
 	g.st.selectedIndices = nil
 	g.st.hasSelection = false
 	g.points.updateGreyoutStatus()
 }
 
-// GetSelectedNodes returns the currently selected nodes (nil = none).
-func (g *Graph) GetSelectedNodes() []*Node {
+// GetSelectedIndices returns the currently selected point indices
+// (nil = no selection).
+func (g *Graph) GetSelectedIndices() []int {
 	if !g.st.hasSelection {
 		return nil
 	}
-	nodes := make([]*Node, 0, len(g.st.selectedIndices))
-	for _, selectedIndex := range g.st.selectedIndices {
-		index := g.data.getInputIndexBySortedIndex(selectedIndex)
-		if node := g.data.getNodeByIndex(index); node != nil {
-			nodes = append(nodes, node)
-		}
-	}
-	return nodes
+	return g.st.selectedIndices
 }
 
-// GetAdjacentNodes returns nodes adjacent to a node by its id.
-func (g *Graph) GetAdjacentNodes(id string) []*Node {
-	return g.data.getAdjacentNodes(id)
-}
-
-// SetFocusedNodeByID highlights a ring around the node ("" resets focus).
-func (g *Graph) SetFocusedNodeByID(id string) {
-	if id == "" {
-		g.st.setFocusedNode(nil, -1)
-	} else {
-		g.st.setFocusedNode(g.data.getNodeByID(id), g.data.getSortedIndexByID(id))
-	}
-}
-
-// SetFocusedNodeByIndex highlights a ring around the node by input index
-// (negative resets focus).
-func (g *Graph) SetFocusedNodeByIndex(index int) {
-	if index < 0 {
-		g.st.setFocusedNode(nil, -1)
-	} else {
-		g.st.setFocusedNode(g.data.getNodeByIndex(index), g.data.getSortedIndexByInputIndex(index))
-	}
+// GetAdjacentIndices returns the indices adjacent to a point.
+func (g *Graph) GetAdjacentIndices(index int) []int {
+	return g.data.getAdjacentIndices(index)
 }
 
 // SpaceToScreenPosition converts X, Y from space to screen coordinates.
@@ -462,129 +683,123 @@ func (g *Graph) SpaceToScreenPosition(spacePosition [2]float64) [2]float64 {
 	return g.zoom.convertSpaceToScreenPosition(spacePosition)
 }
 
+// ScreenToSpacePosition converts X, Y from screen to space coordinates.
+func (g *Graph) ScreenToSpacePosition(screenPosition [2]float64) [2]float64 {
+	return g.zoom.convertScreenToSpacePosition(screenPosition)
+}
+
 // SpaceToScreenRadius converts a radius from space to screen units.
 func (g *Graph) SpaceToScreenRadius(spaceRadius float64) float64 {
 	return g.zoom.convertSpaceToScreenRadius(spaceRadius)
 }
 
-// GetNodeRadiusByIndex returns the node radius by input index (NaN if
-// unknown).
-func (g *Graph) GetNodeRadiusByIndex(index int) float64 {
-	return g.points.getNodeRadiusByIndex(index)
+// GetPointRadiusByIndex returns the point radius by index (NaN if unknown).
+func (g *Graph) GetPointRadiusByIndex(index int) float64 {
+	if index >= 0 && index < len(g.data.pointSizes) {
+		return float64(g.data.pointSizes[index])
+	}
+	return math.NaN()
 }
 
-// GetNodeRadiusByID returns the node radius by id (NaN if unknown).
-func (g *Graph) GetNodeRadiusByID(id string) float64 {
-	index := g.data.getInputIndexByID(id)
+// SetFocusedPointByIndex highlights a ring around the point
+// (negative index resets focus).
+func (g *Graph) SetFocusedPointByIndex(index int) {
 	if index < 0 {
-		return math.NaN()
+		g.st.focusedPointIndex = -1
+	} else {
+		g.st.focusedPointIndex = index
 	}
-	return g.points.getNodeRadiusByIndex(index)
 }
 
-// TrackNodePositionsByIDs tracks node positions by id on each tick.
-func (g *Graph) TrackNodePositionsByIDs(ids []string) {
-	g.points.trackNodesByIds(ids)
+// TrackPointPositionsByIndices tracks point positions on each tick.
+func (g *Graph) TrackPointPositionsByIndices(indices []int) {
+	g.points.trackPointsByIndices(indices)
 }
 
-// TrackNodePositionsByIndices tracks node positions by input index.
-func (g *Graph) TrackNodePositionsByIndices(indices []int) {
-	var ids []string
-	for _, index := range indices {
-		if node := g.data.getNodeByIndex(index); node != nil {
-			ids = append(ids, node.ID)
-		}
-	}
-	g.points.trackNodesByIds(ids)
+// GetTrackedPointPositionsMap returns the tracked point positions.
+func (g *Graph) GetTrackedPointPositionsMap() map[int][2]float64 {
+	return g.points.getTrackedPositionsMap()
 }
 
-// GetTrackedNodePositionsMap returns the current tracked node positions.
-func (g *Graph) GetTrackedNodePositionsMap() map[string][2]float64 {
-	return g.points.getTrackedPositions()
+// GetTrackedPointPositionsArray returns tracked positions as
+// [x1, y1, x2, y2, ...] ordered by the tracked indices.
+func (g *Graph) GetTrackedPointPositionsArray() []float64 {
+	return g.points.getTrackedPositionsArray()
 }
 
-// GetSampledNodePositionsMap returns a spatially sampled subset of the
-// nodes currently visible on screen with their positions.
-func (g *Graph) GetSampledNodePositionsMap() map[string][2]float64 {
-	return g.points.getSampledNodePositionsMap()
+// GetSampledPoints returns a spatially sampled subset of the points
+// visible on screen with their indices and positions.
+func (g *Graph) GetSampledPoints() (indices []int, positions []float64) {
+	return g.points.getSampledPoints()
 }
 
-// Start starts the simulation with the given alpha (0 to 1; higher =
-// more initial energy).
-func (g *Graph) Start(alpha float64) {
-	if len(g.data.nodes) == 0 {
+// Start starts the simulation with the given alpha (default 1).
+func (g *Graph) Start(alpha ...float64) {
+	if g.isDestroyed || g.data.pointsNumber() == 0 {
 		return
 	}
-	g.st.isSimulationRunning = true
-	g.st.alpha = alpha
-	g.st.simulationProgress = 0
-	if g.cfg.Simulation.OnStart != nil {
-		g.cfg.Simulation.OnStart()
+	a := 1.0
+	if len(alpha) > 0 {
+		a = alpha[0]
 	}
-	g.stopFrames()
-	g.frame()
+	g.st.isSimulationRunning = true
+	g.st.simulationProgress = 0
+	g.st.alpha = a
+	if g.cfg.OnSimulationStart != nil {
+		g.cfg.OnSimulationStart()
+	}
 }
 
-// Pause pauses the simulation.
+// Stop stops the simulation and resets its state.
+func (g *Graph) Stop() {
+	g.st.isSimulationRunning = false
+	g.st.simulationProgress = 0
+	g.st.alpha = 0
+	if g.cfg.OnSimulationEnd != nil {
+		g.cfg.OnSimulationEnd()
+	}
+}
+
+// Pause pauses the simulation, preserving its current state.
 func (g *Graph) Pause() {
 	g.st.isSimulationRunning = false
-	if g.cfg.Simulation.OnPause != nil {
-		g.cfg.Simulation.OnPause()
+	if g.cfg.OnSimulationPause != nil {
+		g.cfg.OnSimulationPause()
 	}
 }
 
-// Restart restarts the simulation.
-func (g *Graph) Restart() {
+// Unpause resumes a paused simulation.
+func (g *Graph) Unpause() {
 	g.st.isSimulationRunning = true
-	if g.cfg.Simulation.OnRestart != nil {
-		g.cfg.Simulation.OnRestart()
+	if g.cfg.OnSimulationUnpause != nil {
+		g.cfg.OnSimulationUnpause()
 	}
 }
 
-// Step renders one frame of the simulation and stops it.
+// Step runs one step of the simulation manually, even when paused.
 func (g *Graph) Step() {
-	g.st.isSimulationRunning = false
-	g.stopFrames()
-	g.frame()
+	if g.isDestroyed || !g.cfg.EnableSimulation || g.st.pointsTextureSize == 0 {
+		return
+	}
+	g.runSimulationStep(true)
 }
 
 // Destroy destroys the Graph instance.
 func (g *Graph) Destroy() {
+	if g.isDestroyed {
+		return
+	}
 	if g.fitViewOnInitTimeoutID.Truthy() {
 		js.Global().Call("clearTimeout", g.fitViewOnInitTimeoutID)
 	}
 	g.stopFrames()
-	g.destroyParticleSystem()
 	if g.fps != nil {
 		g.fps.destroy()
 		g.fps = nil
 	}
-}
-
-func (g *Graph) create() {
-	g.points.create()
-	g.lines.create()
-	if g.forceManyBody != nil {
-		g.forceManyBody.create(g.ctx, g.st)
-	}
-	if g.forceLinkIncoming != nil {
-		g.forceLinkIncoming.create(g.ctx, g.st, g.data, linkIncoming)
-	}
-	if g.forceLinkOutgoing != nil {
-		g.forceLinkOutgoing.create(g.ctx, g.st, g.data, linkOutgoing)
-	}
-	if g.forceCenter != nil {
-		g.forceCenter.create(g.ctx)
-	}
-	g.hasParticleSystemDestroyed = false
-}
-
-func (g *Graph) destroyParticleSystem() {
-	if g.hasParticleSystemDestroyed {
-		return
-	}
 	g.points.destroy()
 	g.lines.destroy()
+	g.clusters.destroy()
 	if g.forceCenter != nil {
 		g.forceCenter.destroy()
 	}
@@ -597,29 +812,164 @@ func (g *Graph) destroyParticleSystem() {
 	if g.forceManyBody != nil {
 		g.forceManyBody.destroy()
 	}
-	g.hasParticleSystemDestroyed = true
+	bg := g.st.backgroundColor
+	g.ctx.clearTarget(nil, bg[0], bg[1], bg[2], bg[3])
+	if g.canvas.Get("parentNode").Truthy() {
+		g.canvas.Get("parentNode").Call("removeChild", g.canvas)
+	}
+	for _, f := range g.funcs {
+		f.Release()
+	}
+	g.funcs = nil
+	g.isDestroyed = true
 }
 
-func (g *Graph) update(runSimulation bool) {
-	g.st.pointsTextureSize = int(math.Ceil(math.Sqrt(float64(len(g.data.nodes)))))
+// create applies pending data changes (the v2 create()).
+func (g *Graph) create() {
+	if g.isPointPositionsUpdateNeeded {
+		g.points.updatePositions()
+	}
+	if g.isPointColorUpdateNeeded {
+		g.points.updateColor()
+	}
+	if g.isPointSizeUpdateNeeded {
+		g.points.updateSize()
+	}
+	if g.isPointShapeUpdateNeeded {
+		g.points.updateShape()
+	}
+	if g.isPointImageIndicesUpdateNeeded {
+		g.points.updateImageIndices()
+	}
+	if g.isPointImageSizesUpdateNeeded {
+		g.points.updateImageSizes()
+	}
+
+	if g.isLinksUpdateNeeded {
+		g.lines.updatePointsBuffer()
+	}
+	if g.isLinkColorUpdateNeeded {
+		g.lines.updateColor()
+	}
+	if g.isLinkWidthUpdateNeeded {
+		g.lines.updateWidth()
+	}
+	if g.isLinkArrowUpdateNeeded {
+		g.lines.updateArrow()
+	}
+
+	if g.isForceManyBodyUpdateNeeded && g.forceManyBody != nil {
+		g.forceManyBody.create(g.ctx, g.st)
+	}
+	if g.isForceLinkUpdateNeeded {
+		if g.forceLinkIncoming != nil {
+			g.forceLinkIncoming.create(g.ctx, g.st, g.data, linkIncoming)
+		}
+		if g.forceLinkOutgoing != nil {
+			g.forceLinkOutgoing.create(g.ctx, g.st, g.data, linkOutgoing)
+		}
+	}
+	if g.isForceCenterUpdateNeeded && g.forceCenter != nil {
+		g.forceCenter.create(g.ctx)
+	}
+	if g.isPointClusterUpdateNeeded {
+		g.clusters.create()
+	}
+
+	g.isPointPositionsUpdateNeeded = false
+	g.isPointColorUpdateNeeded = false
+	g.isPointSizeUpdateNeeded = false
+	g.isPointShapeUpdateNeeded = false
+	g.isPointImageIndicesUpdateNeeded = false
+	g.isPointImageSizesUpdateNeeded = false
+	g.isLinksUpdateNeeded = false
+	g.isLinkColorUpdateNeeded = false
+	g.isLinkWidthUpdateNeeded = false
+	g.isLinkArrowUpdateNeeded = false
+	g.isPointClusterUpdateNeeded = false
+	g.isForceManyBodyUpdateNeeded = false
+	g.isForceLinkUpdateNeeded = false
+	g.isForceCenterUpdateNeeded = false
+}
+
+func (g *Graph) update(simulationAlpha float64) {
+	g.st.pointsTextureSize = int(math.Ceil(math.Sqrt(float64(g.data.pointsNumber()))))
 	g.st.linksTextureSize = int(math.Ceil(math.Sqrt(float64(g.data.linksNumber() * 2))))
-	g.destroyParticleSystem()
 	g.create()
 	if err := g.initPrograms(); err != nil {
 		consoleWarn(err.Error())
 	}
-	g.SetFocusedNodeByID("")
-	g.st.hoveredNode = nil
-	if runSimulation {
-		g.Start(1)
-	} else {
-		g.Step()
+	g.st.hoveredPoint = nil
+	g.st.alpha = simulationAlpha
+}
+
+// runSimulationStep runs one step of the simulation (forces, position
+// updates, alpha decay). forceExecution runs the step even when paused.
+func (g *Graph) runSimulationStep(forceExecution bool) {
+	cfg, st := g.cfg, g.st
+	if !cfg.EnableSimulation {
+		return
 	}
+
+	// right-click repulsion (runs regardless of isSimulationRunning)
+	if g.isRightClickMouse && cfg.EnableRightClickRepulsion {
+		g.forceMouse.run()
+		g.points.updatePosition()
+	}
+
+	shouldRunSimulation := forceExecution ||
+		(st.isSimulationRunning && !(g.zoom.isRunning && !cfg.EnableSimulationDuringZoom))
+
+	if shouldRunSimulation {
+		if cfg.SimulationGravity != 0 {
+			g.forceGravity.run()
+			g.points.updatePosition()
+		}
+
+		if cfg.SimulationCenter != 0 {
+			g.forceCenter.run()
+			g.points.updatePosition()
+		}
+
+		g.forceManyBody.run()
+		g.points.updatePosition()
+
+		if st.linksTextureSize > 0 {
+			g.forceLinkIncoming.run()
+			g.points.updatePosition()
+			g.forceLinkOutgoing.run()
+			g.points.updatePosition()
+		}
+
+		if g.data.pointClusters != nil || g.data.clusterPositions != nil {
+			g.clusters.run()
+			g.points.updatePosition()
+		}
+
+		st.alpha += st.addAlpha(cfg.SimulationDecay)
+		if g.isRightClickMouse && cfg.EnableRightClickRepulsion {
+			st.alpha = math.Max(st.alpha, 0.1)
+		}
+		st.simulationProgress = math.Sqrt(math.Min(1, alphaMin/st.alpha))
+
+		if cfg.OnSimulationTick != nil {
+			index := -1
+			var position [2]float64
+			if st.hoveredPoint != nil {
+				index = st.hoveredPoint.index
+				position = st.hoveredPoint.position
+			}
+			cfg.OnSimulationTick(st.alpha, index, position)
+		}
+	}
+
+	// track points (runs regardless of simulation state)
+	g.points.trackPoints()
 }
 
 func (g *Graph) initPrograms() error {
-	quadAttr := []attrBinding{{name: "quad", buffer: func() *buffer { return g.points.quadBuffer }, size: 2}}
-	indexAttr := []attrBinding{{name: "indexes", buffer: func() *buffer { return g.points.indexesBuffer }, size: 2}}
+	quadAttr := []attrBinding{{name: "vertexCoord", buffer: func() *buffer { return g.points.quadBuffer }, size: 2}}
+	indexAttr := []attrBinding{{name: "pointIndices", buffer: func() *buffer { return g.points.indexesBuffer }, size: 2}}
 
 	if err := g.points.initPrograms(); err != nil {
 		return err
@@ -657,149 +1007,147 @@ func (g *Graph) initPrograms() error {
 			return err
 		}
 	}
+	if err := g.clusters.initPrograms(quadAttr, indexAttr); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (g *Graph) frame() {
+	if g.isDestroyed {
+		return
+	}
+	// check if the simulation should end before scheduling the next frame
 	if g.st.alpha < alphaMin && g.st.isSimulationRunning {
 		g.end()
-	}
-	if g.st.pointsTextureSize == 0 {
-		return
 	}
 	g.rafID = js.Global().Call("requestAnimationFrame", g.rafCb)
 }
 
 func (g *Graph) onFrame(now float64) {
-	cfg, st := g.cfg, g.st
+	g.renderFrame(now)
+	if !g.isDestroyed {
+		g.frame()
+	}
+}
+
+func (g *Graph) renderFrame(now float64) {
+	if g.isDestroyed || g.st.pointsTextureSize == 0 {
+		return
+	}
 	if g.fps != nil {
 		g.fps.frame(now)
 	}
 	g.resizeCanvas(false)
 	g.zoom.tick(now)
-	g.findHoveredPoint()
-
-	if !cfg.DisableSimulation {
-		if g.isRightClickMouse {
-			if !st.isSimulationRunning {
-				g.Start(0.1)
-			}
-			g.forceMouse.run()
-			g.points.updatePosition()
-		}
-
-		if st.isSimulationRunning && !g.zoom.isRunning {
-			if cfg.Simulation.Gravity != 0 {
-				g.forceGravity.run()
-				g.points.updatePosition()
-			}
-
-			if cfg.Simulation.Center != 0 {
-				g.forceCenter.run()
-				g.points.updatePosition()
-			}
-
-			g.forceManyBody.run()
-			g.points.updatePosition()
-
-			if st.linksTextureSize > 0 {
-				g.forceLinkIncoming.run()
-				g.points.updatePosition()
-				g.forceLinkOutgoing.run()
-				g.points.updatePosition()
-			}
-
-			st.alpha += st.addAlpha(cfg.Simulation.Decay)
-			if g.isRightClickMouse {
-				st.alpha = math.Max(st.alpha, 0.1)
-			}
-			st.simulationProgress = math.Sqrt(math.Min(1, alphaMin/st.alpha))
-			if cfg.Simulation.OnTick != nil {
-				var hovered *Node
-				index := -1
-				var position [2]float64
-				if st.hoveredNode != nil {
-					hovered = st.hoveredNode.node
-					index = g.data.getInputIndexBySortedIndex(st.hoveredNode.index)
-					position = st.hoveredNode.position
-				}
-				cfg.Simulation.OnTick(st.alpha, hovered, index, position)
-			}
-		}
-
-		g.points.trackPoints()
+	if !g.zoom.dragActive {
+		g.findHoveredItem()
 	}
 
+	g.runSimulationStep(false)
+
 	// clear canvas
-	bg := st.backgroundColor
+	bg := g.st.backgroundColor
 	g.ctx.clearTarget(nil, bg[0], bg[1], bg[2], bg[3])
 
-	if cfg.RenderLinks && st.linksTextureSize > 0 {
+	if g.cfg.RenderLinks && g.st.linksTextureSize > 0 {
 		g.lines.draw()
 	}
 
 	g.points.draw()
-
+	if g.zoom.dragActive {
+		// run the drag function twice to prevent the dragged point from
+		// suddenly jumping
+		g.points.drag()
+		g.points.drag()
+		g.points.trackPoints()
+	}
 	g.currentEvent = js.Value{}
-	g.frame()
 }
 
 func (g *Graph) stopFrames() {
 	if g.rafID.Truthy() {
 		js.Global().Call("cancelAnimationFrame", g.rafID)
+		g.rafID = js.Value{}
 	}
+	g.framesRunning = false
 }
 
+func (g *Graph) startFrames() {
+	if g.isDestroyed {
+		return
+	}
+	g.stopFrames()
+	g.framesRunning = true
+	g.frame()
+}
+
+// end is called automatically when the simulation completes.
 func (g *Graph) end() {
 	g.st.isSimulationRunning = false
 	g.st.simulationProgress = 1
-	if g.cfg.Simulation.OnEnd != nil {
-		g.cfg.Simulation.OnEnd()
+	if g.cfg.OnSimulationEnd != nil {
+		g.cfg.OnSimulationEnd()
 	}
 }
 
 func (g *Graph) onClick(event js.Value) {
-	if g.cfg.Events.OnClick != nil {
-		var node *Node
-		index := -1
-		var position [2]float64
-		if g.st.hoveredNode != nil {
-			node = g.st.hoveredNode.node
-			index = g.data.getInputIndexBySortedIndex(g.st.hoveredNode.index)
-			position = g.st.hoveredNode.position
+	index := -1
+	var position [2]float64
+	if g.st.hoveredPoint != nil {
+		index = g.st.hoveredPoint.index
+		position = g.st.hoveredPoint.position
+	}
+	if g.cfg.OnClick != nil {
+		g.cfg.OnClick(index, position, event)
+	}
+	if g.st.hoveredPoint != nil {
+		if g.cfg.OnPointClick != nil {
+			g.cfg.OnPointClick(index, position, event)
 		}
-		g.cfg.Events.OnClick(node, index, position, event)
+	} else if g.st.hoveredLinkIndex >= 0 {
+		if g.cfg.OnLinkClick != nil {
+			g.cfg.OnLinkClick(g.st.hoveredLinkIndex, event)
+		}
+	} else if g.cfg.OnBackgroundClick != nil {
+		g.cfg.OnBackgroundClick(event)
 	}
 }
 
 func (g *Graph) updateMousePosition(event js.Value) {
-	if !event.Truthy() || event.Get("offsetX").IsUndefined() {
+	if !event.Truthy() {
 		return
 	}
-	mouseX := event.Get("offsetX").Float()
+	off := event.Get("offsetX")
+	if off.IsUndefined() {
+		return
+	}
+	mouseX := off.Float()
 	mouseY := event.Get("offsetY").Float()
 	g.st.mousePosition = g.zoom.convertScreenToSpacePosition([2]float64{mouseX, mouseY})
 	g.st.screenMousePosition = [2]float64{mouseX, g.st.screenSize[1] - mouseY}
 }
 
 func (g *Graph) onMouseMove(event js.Value) {
+	g.isMouseOnCanvas = true
 	g.currentEvent = event
 	g.updateMousePosition(event)
 	g.isRightClickMouse = event.Get("which").Int() == 3
-	if g.cfg.Events.OnMouseMove != nil {
-		var node *Node
+	if g.cfg.OnMouseMove != nil {
 		index := -1
 		var position [2]float64
-		if g.st.hoveredNode != nil {
-			node = g.st.hoveredNode.node
-			index = g.data.getInputIndexBySortedIndex(g.st.hoveredNode.index)
-			position = g.st.hoveredNode.position
+		if g.st.hoveredPoint != nil {
+			index = g.st.hoveredPoint.index
+			position = g.st.hoveredPoint.position
 		}
-		g.cfg.Events.OnMouseMove(node, index, position, g.currentEvent)
+		g.cfg.OnMouseMove(index, position, g.currentEvent)
 	}
 }
 
 func (g *Graph) resizeCanvas(forceResize bool) {
+	if g.isDestroyed {
+		return
+	}
 	prevWidth := g.canvas.Get("width").Float()
 	prevHeight := g.canvas.Get("height").Float()
 	w := g.canvas.Get("clientWidth").Float()
@@ -816,97 +1164,160 @@ func (g *Graph) resizeCanvas(forceResize bool) {
 		g.canvas.Set("height", h*g.cfg.PixelRatio)
 		transform := g.zoom.getTransform([][2]float64{centerPosition}, k, true, 0.1)
 		g.zoom.transformTo(transform, 0, nil)
-		g.points.updateSampledNodesGrid()
+		g.points.updateSampledPointsGrid()
+		if g.st.isLinkHoveringEnabled {
+			g.lines.updateLinkIndexFbo()
+		}
 	}
 }
 
-func (g *Graph) setZoomTransformByNodePositions(positions [][2]float64, duration float64, scale float64, padding float64) {
+func (g *Graph) setZoomTransformByPointPositions(positions []float64, duration float64, scale float64, padding float64) {
 	g.resizeCanvas(false)
-	transform := g.zoom.getTransform(positions, scale, !math.IsNaN(scale), padding)
+	pairs := make([][2]float64, len(positions)/2)
+	for i := range pairs {
+		pairs[i] = [2]float64{positions[i*2], positions[i*2+1]}
+	}
+	transform := g.zoom.getTransform(pairs, scale, !math.IsNaN(scale), padding)
 	g.zoom.transformTo(transform, duration, easeQuadInOut)
 }
 
-func (g *Graph) zoomToNode(node *Node, duration float64, scale float64, canZoomOut bool) {
-	pixels := g.points.currentPositionFbo.readPixels()
-	nodeIndex := g.data.getSortedIndexByID(node.ID)
-	if nodeIndex < 0 || nodeIndex*4+1 >= len(pixels) {
-		return
-	}
-	posX := float64(pixels[nodeIndex*4])
-	posY := float64(pixels[nodeIndex*4+1])
-	distance := g.zoom.getDistanceToPoint([2]float64{posX, posY})
-	zoomLevel := scale
-	if !canZoomOut {
-		zoomLevel = math.Max(g.GetZoomLevel(), scale)
-	}
-	if distance < math.Min(g.st.screenSize[0], g.st.screenSize[1]) {
-		g.setZoomTransformByNodePositions([][2]float64{{posX, posY}}, duration, zoomLevel, 0.1)
-	} else {
-		transform := g.zoom.getTransform([][2]float64{{posX, posY}}, zoomLevel, true, 0.1)
-		middle := g.zoom.getMiddlePointTransform([2]float64{posX, posY})
-		g.zoom.transformChain(
-			[]zoomTransform{middle, transform},
-			[]float64{duration / 2, duration / 2},
-			[]func(float64) float64{easeQuadIn, easeQuadOut},
-		)
-	}
+// EnableZoom / DisableZoom toggle wheel zooming (panning stays available,
+// matching the original behavior).
+func (g *Graph) EnableZoom() {
+	g.cfg.EnableZoom = true
+	g.zoom.wheelEnabled = true
 }
 
-// DisableZoom turns wheel zooming off (panning stays available, matching
-// the original behavior).
-func (g *Graph) DisableZoom() { g.zoom.wheelEnabled = false }
+func (g *Graph) DisableZoom() {
+	g.cfg.EnableZoom = false
+	g.zoom.wheelEnabled = false
+}
 
-// EnableZoom turns wheel zooming back on.
-func (g *Graph) EnableZoom() { g.zoom.wheelEnabled = true }
+func (g *Graph) findHoveredItem() {
+	if g.isDestroyed || !g.isMouseOnCanvas {
+		return
+	}
+	if g.findHoveredItemExecutionCount < maxHoverDetectionDelay {
+		g.findHoveredItemExecutionCount++
+		return
+	}
+	g.findHoveredItemExecutionCount = 0
+	g.findHoveredPoint()
+
+	if g.data.linksNumber() > 0 && g.st.isLinkHoveringEnabled {
+		g.findHoveredLine()
+	} else if g.st.hoveredLinkIndex >= 0 {
+		g.st.hoveredLinkIndex = -1
+		if g.cfg.OnLinkMouseOut != nil {
+			g.cfg.OnLinkMouseOut(g.currentEvent)
+		}
+	}
+
+	g.updateCanvasCursor()
+}
 
 func (g *Graph) findHoveredPoint() {
-	if !g.isMouseOnCanvas {
+	if g.points.hoveredFbo == nil {
 		return
 	}
-	if g.findHoveredPointExecutionCount < 2 {
-		g.findHoveredPointExecutionCount++
-		return
-	}
-	g.findHoveredPointExecutionCount = 0
 	g.points.findHoveredPoint()
 	isMouseover := false
 	isMouseout := false
 	pixels := g.points.hoveredFbo.readPixels()
-	nodeSize := float64(pixels[1])
-	if nodeSize != 0 {
-		index := int(pixels[0])
-		inputIndex := g.data.getInputIndexBySortedIndex(index)
-		hovered := g.data.getNodeByIndex(inputIndex)
-		if g.st.hoveredNode == nil || g.st.hoveredNode.node != hovered {
+	pointSize := float64(pixels[1])
+	if pointSize != 0 {
+		hoveredIndex := int(pixels[0])
+		if g.st.hoveredPoint == nil || g.st.hoveredPoint.index != hoveredIndex {
 			isMouseover = true
 		}
-		pointX := float64(pixels[2])
-		pointY := float64(pixels[3])
-		if hovered != nil {
-			g.st.hoveredNode = &hoveredNode{node: hovered, index: index, position: [2]float64{pointX, pointY}}
-		} else {
-			g.st.hoveredNode = nil
+		g.st.hoveredPoint = &hoveredPoint{
+			index:    hoveredIndex,
+			position: [2]float64{float64(pixels[2]), float64(pixels[3])},
 		}
 	} else {
-		if g.st.hoveredNode != nil {
+		if g.st.hoveredPoint != nil {
 			isMouseout = true
 		}
-		g.st.hoveredNode = nil
+		g.st.hoveredPoint = nil
 	}
 
-	if isMouseover && g.st.hoveredNode != nil {
-		if g.cfg.Events.OnNodeMouseOver != nil {
-			g.cfg.Events.OnNodeMouseOver(
-				g.st.hoveredNode.node,
-				g.data.getInputIndexBySortedIndex(g.st.hoveredNode.index),
-				g.st.hoveredNode.position,
-				g.currentEvent,
-			)
+	if isMouseover && g.st.hoveredPoint != nil && g.cfg.OnPointMouseOver != nil {
+		g.cfg.OnPointMouseOver(g.st.hoveredPoint.index, g.st.hoveredPoint.position, g.currentEvent)
+	}
+	if isMouseout && g.cfg.OnPointMouseOut != nil {
+		g.cfg.OnPointMouseOut(g.currentEvent)
+	}
+}
+
+func (g *Graph) findHoveredLine() {
+	if g.st.hoveredPoint != nil {
+		if g.st.hoveredLinkIndex >= 0 {
+			g.st.hoveredLinkIndex = -1
+			if g.cfg.OnLinkMouseOut != nil {
+				g.cfg.OnLinkMouseOut(g.currentEvent)
+			}
 		}
+		return
 	}
-	if isMouseout && g.cfg.Events.OnNodeMouseOut != nil {
-		g.cfg.Events.OnNodeMouseOut(g.currentEvent)
+	g.lines.findHoveredLine()
+	if g.lines.hoveredLineIndexFbo == nil {
+		return
 	}
+	isMouseover := false
+	isMouseout := false
+	pixels := g.lines.hoveredLineIndexFbo.readPixels()
+	hoveredLineIndex := int(pixels[0])
+	if hoveredLineIndex >= 0 {
+		if g.st.hoveredLinkIndex != hoveredLineIndex {
+			isMouseover = true
+		}
+		g.st.hoveredLinkIndex = hoveredLineIndex
+	} else {
+		if g.st.hoveredLinkIndex >= 0 {
+			isMouseout = true
+		}
+		g.st.hoveredLinkIndex = -1
+	}
+
+	if isMouseover && g.st.hoveredLinkIndex >= 0 && g.cfg.OnLinkMouseOver != nil {
+		g.cfg.OnLinkMouseOver(g.st.hoveredLinkIndex)
+	}
+	if isMouseout && g.cfg.OnLinkMouseOut != nil {
+		g.cfg.OnLinkMouseOut(g.currentEvent)
+	}
+}
+
+func (g *Graph) updateCanvasCursor() {
+	style := g.canvas.Get("style")
+	switch {
+	case g.zoom.dragActive:
+		style.Call("setProperty", "cursor", "grabbing")
+	case g.st.hoveredPoint != nil:
+		if !g.cfg.EnableDrag || g.st.isSpaceKeyPressed {
+			style.Call("setProperty", "cursor", g.cfg.HoveredPointCursor)
+		} else {
+			style.Call("setProperty", "cursor", "grab")
+		}
+	case g.st.isLinkHoveringEnabled && g.st.hoveredLinkIndex >= 0:
+		style.Call("setProperty", "cursor", g.cfg.HoveredLinkCursor)
+	default:
+		style.Call("removeProperty", "cursor")
+	}
+}
+
+// addAttribution adds the attribution text (plain text; unlike the
+// original no HTML is injected).
+func (g *Graph) addAttribution() {
+	if g.cfg.Attribution == "" {
+		return
+	}
+	document := js.Global().Get("document")
+	el := document.Call("createElement", "div")
+	el.Get("style").Set("cssText",
+		"user-select: none; position: absolute; bottom: 0; right: 0; "+
+			"color: #888; margin: 0 0.6rem 0.6rem 0; font-size: 0.7rem; font-family: inherit;")
+	el.Set("textContent", g.cfg.Attribution)
+	g.div.Call("appendChild", el)
 }
 
 func setTimeout(fn func(), ms float64) js.Value {

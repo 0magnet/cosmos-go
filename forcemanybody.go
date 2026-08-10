@@ -51,99 +51,111 @@ func (f *forceManyBody) create(ctx *glCtx, st *store) {
 	}
 	f.quadtreeLevels = int(math.Log2(st.adjustedSpaceSize))
 	f.spaceSize = st.adjustedSpaceSize
+	for _, fbo := range f.levelsFbos {
+		fbo.destroy()
+	}
 	f.levelsFbos = f.levelsFbos[:0]
 	for i := 0; i < f.quadtreeLevels; i++ {
 		levelTextureSize := 1 << uint(i+1)
 		f.levelsFbos = append(f.levelsFbos, ctx.newFramebuffer(levelTextureSize, levelTextureSize, nil))
 	}
+	f.randomValuesFbo.destroy()
 	f.randomValuesFbo = createRandomValuesFbo(ctx, st)
 }
 
 func (f *forceManyBody) initPrograms(ctx *glCtx, cfg *Config, st *store, data *graphData, pts *points, quadAttr, indexAttr []attrBinding) error {
-	prog, err := ctx.program(quadVert, clearFrag)
-	if err != nil {
-		return err
-	}
-	f.clearLevelsCommand = &command{
-		ctx: ctx, prog: prog,
-		fbo:       func() *framebuffer { return f.propLevelFbo },
-		primitive: "triangle strip",
-		count:     func() int { return 4 },
-		attrs:     quadAttr,
-		uniforms:  map[string]func() uniformValue{},
-	}
-	f.clearVelocityCommand = &command{
-		ctx: ctx, prog: prog,
-		fbo:       func() *framebuffer { return pts.velocityFbo },
-		primitive: "triangle strip",
-		count:     func() int { return 4 },
-		attrs:     quadAttr,
-		uniforms:  map[string]func() uniformValue{},
-	}
-
-	prog, err = ctx.program(calculateLevelVert, calculateLevelFrag)
-	if err != nil {
-		return err
-	}
-	f.calculateLevelsCommand = &command{
-		ctx: ctx, prog: prog,
-		fbo:       func() *framebuffer { return f.propLevelFbo },
-		primitive: "points",
-		count:     func() int { return len(data.nodes) },
-		attrs:     indexAttr,
-		uniforms: map[string]func() uniformValue{
-			"position":          func() uniformValue { return pts.previousPositionFbo },
-			"pointsTextureSize": func() uniformValue { return float64(st.pointsTextureSize) },
-			"levelTextureSize":  func() uniformValue { return f.propLevelTextureSize },
-			"cellSize":          func() uniformValue { return f.propCellSize },
-		},
-		blend: "add", depthOff: true,
+	if f.clearLevelsCommand == nil {
+		prog, err := ctx.program(quadVert, clearFrag)
+		if err != nil {
+			return err
+		}
+		f.clearLevelsCommand = &command{
+			ctx: ctx, prog: prog,
+			fbo:       func() *framebuffer { return f.propLevelFbo },
+			primitive: "triangle strip",
+			count:     func() int { return 4 },
+			attrs:     quadAttr,
+			uniforms:  map[string]func() uniformValue{},
+		}
+		f.clearVelocityCommand = &command{
+			ctx: ctx, prog: prog,
+			fbo:       func() *framebuffer { return pts.velocityFbo },
+			primitive: "triangle strip",
+			count:     func() int { return 4 },
+			attrs:     quadAttr,
+			uniforms:  map[string]func() uniformValue{},
+		}
 	}
 
-	prog, err = ctx.program(quadVert, forceLevelFrag)
-	if err != nil {
-		return err
-	}
-	f.forceCommand = &command{
-		ctx: ctx, prog: prog,
-		fbo:       func() *framebuffer { return pts.velocityFbo },
-		primitive: "triangle strip",
-		count:     func() int { return 4 },
-		attrs:     quadAttr,
-		uniforms: map[string]func() uniformValue{
-			"position":         func() uniformValue { return pts.previousPositionFbo },
-			"level":            func() uniformValue { return float64(f.propLevel) },
-			"levels":           func() uniformValue { return float64(f.quadtreeLevels) },
-			"levelFbo":         func() uniformValue { return f.propLevelFbo },
-			"levelTextureSize": func() uniformValue { return f.propLevelTextureSize },
-			"alpha":            func() uniformValue { return st.alpha },
-			"repulsion":        func() uniformValue { return cfg.Simulation.Repulsion },
-			"spaceSize":        func() uniformValue { return st.adjustedSpaceSize },
-			"theta":            func() uniformValue { return cfg.Simulation.RepulsionTheta },
-		},
-		blend: "add", depthOff: true,
+	if f.calculateLevelsCommand == nil {
+		prog, err := ctx.program(calculateLevelVert, calculateLevelFrag)
+		if err != nil {
+			return err
+		}
+		f.calculateLevelsCommand = &command{
+			ctx: ctx, prog: prog,
+			fbo:       func() *framebuffer { return f.propLevelFbo },
+			primitive: "points",
+			count:     func() int { return data.pointsNumber() },
+			attrs:     indexAttr,
+			uniforms: map[string]func() uniformValue{
+				"positionsTexture":  func() uniformValue { return pts.previousPositionFbo },
+				"pointsTextureSize": func() uniformValue { return float64(st.pointsTextureSize) },
+				"levelTextureSize":  func() uniformValue { return f.propLevelTextureSize },
+				"cellSize":          func() uniformValue { return f.propCellSize },
+			},
+			blend: "add", depthOff: true,
+		}
 	}
 
-	prog, err = ctx.program(quadVert, forceCentermassFrag)
-	if err != nil {
-		return err
+	if f.forceCommand == nil {
+		prog, err := ctx.program(quadVert, forceLevelFrag)
+		if err != nil {
+			return err
+		}
+		f.forceCommand = &command{
+			ctx: ctx, prog: prog,
+			fbo:       func() *framebuffer { return pts.velocityFbo },
+			primitive: "triangle strip",
+			count:     func() int { return 4 },
+			attrs:     quadAttr,
+			uniforms: map[string]func() uniformValue{
+				"positionsTexture": func() uniformValue { return pts.previousPositionFbo },
+				"level":            func() uniformValue { return float64(f.propLevel) },
+				"levels":           func() uniformValue { return float64(f.quadtreeLevels) },
+				"levelFbo":         func() uniformValue { return f.propLevelFbo },
+				"levelTextureSize": func() uniformValue { return f.propLevelTextureSize },
+				"alpha":            func() uniformValue { return st.alpha },
+				"repulsion":        func() uniformValue { return cfg.SimulationRepulsion },
+				"spaceSize":        func() uniformValue { return st.adjustedSpaceSize },
+				"theta":            func() uniformValue { return cfg.SimulationRepulsionTheta },
+			},
+			blend: "add", depthOff: true,
+		}
 	}
-	f.forceFromCentermassCommand = &command{
-		ctx: ctx, prog: prog,
-		fbo:       func() *framebuffer { return pts.velocityFbo },
-		primitive: "triangle strip",
-		count:     func() int { return 4 },
-		attrs:     quadAttr,
-		uniforms: map[string]func() uniformValue{
-			"position":         func() uniformValue { return pts.previousPositionFbo },
-			"randomValues":     func() uniformValue { return f.randomValuesFbo },
-			"levelFbo":         func() uniformValue { return f.propLevelFbo },
-			"levelTextureSize": func() uniformValue { return f.propLevelTextureSize },
-			"alpha":            func() uniformValue { return st.alpha },
-			"repulsion":        func() uniformValue { return cfg.Simulation.Repulsion },
-			"spaceSize":        func() uniformValue { return st.adjustedSpaceSize },
-		},
-		blend: "add", depthOff: true,
+
+	if f.forceFromCentermassCommand == nil {
+		prog, err := ctx.program(quadVert, forceCentermassFrag)
+		if err != nil {
+			return err
+		}
+		f.forceFromCentermassCommand = &command{
+			ctx: ctx, prog: prog,
+			fbo:       func() *framebuffer { return pts.velocityFbo },
+			primitive: "triangle strip",
+			count:     func() int { return 4 },
+			attrs:     quadAttr,
+			uniforms: map[string]func() uniformValue{
+				"positionsTexture": func() uniformValue { return pts.previousPositionFbo },
+				"randomValues":     func() uniformValue { return f.randomValuesFbo },
+				"levelFbo":         func() uniformValue { return f.propLevelFbo },
+				"levelTextureSize": func() uniformValue { return f.propLevelTextureSize },
+				"alpha":            func() uniformValue { return st.alpha },
+				"repulsion":        func() uniformValue { return cfg.SimulationRepulsion },
+				"spaceSize":        func() uniformValue { return st.adjustedSpaceSize },
+			},
+			blend: "add", depthOff: true,
+		}
 	}
 	return nil
 }
@@ -203,60 +215,68 @@ func (f *forceManyBodyQuadtree) create(ctx *glCtx, st *store) {
 	}
 	f.quadtreeLevels = int(math.Log2(st.adjustedSpaceSize))
 	f.spaceSize = st.adjustedSpaceSize
+	for _, fbo := range f.levelsFbos {
+		fbo.destroy()
+	}
 	f.levelsFbos = f.levelsFbos[:0]
 	for i := 0; i < f.quadtreeLevels; i++ {
 		levelTextureSize := 1 << uint(i+1)
 		f.levelsFbos = append(f.levelsFbos, ctx.newFramebuffer(levelTextureSize, levelTextureSize, nil))
 	}
+	f.randomValuesFbo.destroy()
 	f.randomValuesFbo = createRandomValuesFbo(ctx, st)
 }
 
 func (f *forceManyBodyQuadtree) initPrograms(ctx *glCtx, cfg *Config, st *store, data *graphData, pts *points, quadAttr, indexAttr []attrBinding) error {
-	prog, err := ctx.program(quadVert, clearFrag)
-	if err != nil {
-		return err
+	if f.clearLevelsCommand == nil {
+		prog, err := ctx.program(quadVert, clearFrag)
+		if err != nil {
+			return err
+		}
+		f.clearLevelsCommand = &command{
+			ctx: ctx, prog: prog,
+			fbo:       func() *framebuffer { return f.propLevelFbo },
+			primitive: "triangle strip",
+			count:     func() int { return 4 },
+			attrs:     quadAttr,
+			uniforms:  map[string]func() uniformValue{},
+		}
 	}
-	f.clearLevelsCommand = &command{
-		ctx: ctx, prog: prog,
-		fbo:       func() *framebuffer { return f.propLevelFbo },
-		primitive: "triangle strip",
-		count:     func() int { return 4 },
-		attrs:     quadAttr,
-		uniforms:  map[string]func() uniformValue{},
-	}
-	prog, err = ctx.program(calculateLevelVert, calculateLevelFrag)
-	if err != nil {
-		return err
-	}
-	f.calculateLevelsCommand = &command{
-		ctx: ctx, prog: prog,
-		fbo:       func() *framebuffer { return f.propLevelFbo },
-		primitive: "points",
-		count:     func() int { return len(data.nodes) },
-		attrs:     indexAttr,
-		uniforms: map[string]func() uniformValue{
-			"position":          func() uniformValue { return pts.previousPositionFbo },
-			"pointsTextureSize": func() uniformValue { return float64(st.pointsTextureSize) },
-			"levelTextureSize":  func() uniformValue { return f.propLevelTextureSize },
-			"cellSize":          func() uniformValue { return f.propCellSize },
-		},
-		blend: "add", depthOff: true,
+	if f.calculateLevelsCommand == nil {
+		prog, err := ctx.program(calculateLevelVert, calculateLevelFrag)
+		if err != nil {
+			return err
+		}
+		f.calculateLevelsCommand = &command{
+			ctx: ctx, prog: prog,
+			fbo:       func() *framebuffer { return f.propLevelFbo },
+			primitive: "points",
+			count:     func() int { return data.pointsNumber() },
+			attrs:     indexAttr,
+			uniforms: map[string]func() uniformValue{
+				"positionsTexture":  func() uniformValue { return pts.previousPositionFbo },
+				"pointsTextureSize": func() uniformValue { return float64(st.pointsTextureSize) },
+				"levelTextureSize":  func() uniformValue { return f.propLevelTextureSize },
+				"cellSize":          func() uniformValue { return f.propCellSize },
+			},
+			blend: "add", depthOff: true,
+		}
 	}
 
-	startLevel := cfg.Simulation.RepulsionQuadtreeLevels
+	startLevel := cfg.SimulationRepulsionQuadtreeLevels
 	uniforms := map[string]func() uniformValue{
-		"position":     func() uniformValue { return pts.previousPositionFbo },
-		"randomValues": func() uniformValue { return f.randomValuesFbo },
-		"spaceSize":    func() uniformValue { return st.adjustedSpaceSize },
-		"repulsion":    func() uniformValue { return cfg.Simulation.Repulsion },
-		"theta":        func() uniformValue { return cfg.Simulation.RepulsionTheta },
-		"alpha":        func() uniformValue { return st.alpha },
+		"positionsTexture": func() uniformValue { return pts.previousPositionFbo },
+		"randomValues":     func() uniformValue { return f.randomValuesFbo },
+		"spaceSize":        func() uniformValue { return st.adjustedSpaceSize },
+		"repulsion":        func() uniformValue { return cfg.SimulationRepulsion },
+		"theta":            func() uniformValue { return cfg.SimulationRepulsionTheta },
+		"alpha":            func() uniformValue { return st.alpha },
 	}
 	for i := 0; i < f.quadtreeLevels; i++ {
 		i := i
 		uniforms[levelUniformName(i)] = func() uniformValue { return f.levelsFbos[i] }
 	}
-	prog, err = ctx.program(quadVert, quadtreeFrag(startLevel, f.quadtreeLevels))
+	prog, err := ctx.program(quadVert, quadtreeFrag(startLevel, f.quadtreeLevels))
 	if err != nil {
 		return err
 	}

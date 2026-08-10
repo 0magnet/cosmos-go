@@ -1,7 +1,7 @@
 //go:build js && wasm
 
-// Demo for cosmos-go: a clustered random graph with hover, click,
-// selection and zoom controls.
+// Demo for cosmos-go: a clustered random graph with hover, click, drag,
+// selection, point shapes and zoom controls.
 package main
 
 import (
@@ -14,49 +14,63 @@ import (
 
 var document = js.Global().Get("document")
 
-var clusterColors = []string{
-	"#fd7f6f", "#7eb0d5", "#b2e061", "#bd7ebe",
-	"#ffb55a", "#ffee65", "#beb9db", "#fdcce5", "#8bd3c7",
+// cluster colors as 0..255 RGB + 0..1 alpha (the cosmos color format)
+var clusterColors = [][4]float32{
+	{253, 127, 111, 1}, {126, 176, 213, 1}, {178, 224, 97, 1}, {189, 126, 190, 1},
+	{255, 181, 90, 1}, {255, 238, 101, 1}, {190, 185, 219, 1}, {253, 204, 229, 1},
 }
 
-func generateClusteredGraph(clusters, nodesPerCluster int) ([]cosmos.Node, []cosmos.Link) {
-	var nodes []cosmos.Node
-	var links []cosmos.Link
-	r := rand.New(rand.NewSource(42))
+const (
+	clusters         = 8
+	pointsPerCluster = 220
+)
 
-	hubID := func(c int) string { return fmt.Sprintf("hub-%d", c) }
+func generateClusteredGraph() (positions, colors, sizes, shapes []float32, links []float32, hubs []int) {
+	r := rand.New(rand.NewSource(42))
+	total := clusters * (pointsPerCluster + 1)
+	positions = make([]float32, 0, total*2)
+	colors = make([]float32, 0, total*4)
+	sizes = make([]float32, 0, total)
+	shapes = make([]float32, 0, total)
+
+	// random initial positions near the space center (the simulation takes
+	// over from there; unlike v1, cosmos v2 uses the given positions as-is)
+	const space = 8192.0
+	randPos := func() float32 { return float32(space * (0.45 + 0.1*r.Float64())) }
+
+	index := 0
 	for c := 0; c < clusters; c++ {
 		color := clusterColors[c%len(clusterColors)]
-		nodes = append(nodes, cosmos.Node{ID: hubID(c), Color: color, Size: 12})
-		for n := 0; n < nodesPerCluster; n++ {
-			id := fmt.Sprintf("n-%d-%d", c, n)
-			nodes = append(nodes, cosmos.Node{ID: id, Color: color, Size: 3 + r.Float64()*4})
-			links = append(links, cosmos.Link{Source: id, Target: hubID(c)})
-			// a few intra-cluster cross links
+		shape := cosmos.PointShape(c % 8)
+		// hub
+		hubs = append(hubs, index)
+		positions = append(positions, randPos(), randPos())
+		colors = append(colors, color[0], color[1], color[2], color[3])
+		sizes = append(sizes, 12)
+		shapes = append(shapes, shape)
+		hubIndex := index
+		index++
+		for n := 0; n < pointsPerCluster; n++ {
+			positions = append(positions, randPos(), randPos())
+			colors = append(colors, color[0], color[1], color[2], color[3])
+			sizes = append(sizes, 3+r.Float32()*4)
+			shapes = append(shapes, shape)
+			links = append(links, float32(index), float32(hubIndex))
 			if n > 0 && r.Float64() < 0.2 {
-				other := fmt.Sprintf("n-%d-%d", c, r.Intn(n))
-				links = append(links, cosmos.Link{Source: id, Target: other})
+				other := hubIndex + 1 + r.Intn(n)
+				links = append(links, float32(index), float32(other))
 			}
+			index++
 		}
 	}
 	// connect the cluster hubs in a ring plus some random chords
 	for c := 0; c < clusters; c++ {
-		links = append(links, cosmos.Link{
-			Source: hubID(c),
-			Target: hubID((c + 1) % clusters),
-			Width:  2.5,
-			Color:  "#aaaaaa",
-		})
+		links = append(links, float32(hubs[c]), float32(hubs[(c+1)%clusters]))
 		if r.Float64() < 0.5 {
-			links = append(links, cosmos.Link{
-				Source: hubID(c),
-				Target: hubID(r.Intn(clusters)),
-				Width:  2,
-				Color:  "#888888",
-			})
+			links = append(links, float32(hubs[c]), float32(hubs[r.Intn(clusters)]))
 		}
 	}
-	return nodes, links
+	return
 }
 
 func setStatus(text string) {
@@ -71,63 +85,74 @@ func onClick(id string, fn func()) {
 }
 
 func main() {
-	canvas := document.Call("getElementById", "cosmos")
+	div := document.Call("getElementById", "cosmos")
 
 	cfg := cosmos.NewConfig()
 	cfg.BackgroundColor = "#0d1117"
-	cfg.SpaceSize = 4096
-	cfg.NodeSize = 4
-	cfg.LinkWidth = 1
-	cfg.LinkColor = "#5F74C2"
-	cfg.LinkArrows = false
-	cfg.Simulation.Repulsion = 1.0
-	cfg.Simulation.RepulsionTheta = 1.7
-	cfg.Simulation.LinkSpring = 1.2
-	cfg.Simulation.LinkDistance = 10
-	cfg.Simulation.Gravity = 0.15
-	cfg.Simulation.Friction = 0.85
-	cfg.Simulation.Decay = 2000
+	cfg.SpaceSize = 8192
+	cfg.PointDefaultSize = 4
+	cfg.LinkDefaultColor = "#5F74C2"
+	cfg.RenderHoveredPointRing = true
+	cfg.HoveredPointRingColor = "white"
+	cfg.EnableDrag = true
+	cfg.EnableRightClickRepulsion = true
+	cfg.SimulationRepulsion = 1.0
+	cfg.SimulationLinkSpring = 1.2
+	cfg.SimulationLinkDistance = 10
+	cfg.SimulationGravity = 0.25
+	cfg.SimulationDecay = 5000
 	cfg.RandomSeed = "skywire"
-	cfg.Events.OnClick = func(node *cosmos.Node, index int, pos [2]float64, event js.Value) {
-		if node != nil {
-			setStatus(fmt.Sprintf("clicked: %s (index %d)", node.ID, index))
-		} else {
-			setStatus("clicked: background")
-		}
+	cfg.OnPointClick = func(index int, pos [2]float64, event js.Value) {
+		setStatus(fmt.Sprintf("clicked point %d", index))
 	}
-	cfg.Events.OnNodeMouseOver = func(node *cosmos.Node, index int, pos [2]float64, event js.Value) {
-		setStatus("hovered: " + node.ID)
+	cfg.OnBackgroundClick = func(event js.Value) {
+		setStatus("clicked background")
 	}
-	cfg.Events.OnNodeMouseOut = func(event js.Value) {
+	cfg.OnPointMouseOver = func(index int, pos [2]float64, event js.Value) {
+		setStatus(fmt.Sprintf("hovered point %d", index))
+	}
+	cfg.OnPointMouseOut = func(event js.Value) {
 		setStatus("")
 	}
-	cfg.Simulation.OnEnd = func() {
+	cfg.OnLinkMouseOver = func(linkIndex int) {
+		setStatus(fmt.Sprintf("hovered link %d", linkIndex))
+	}
+	cfg.OnLinkMouseOut = func(event js.Value) {
+		setStatus("")
+	}
+	cfg.OnSimulationEnd = func() {
 		setStatus("simulation settled")
 	}
 
-	graph, err := cosmos.New(canvas, cfg)
+	graph, err := cosmos.New(div, cfg)
 	if err != nil {
 		js.Global().Get("console").Call("error", err.Error())
 		return
 	}
+
+	positions, colors, sizes, shapes, links, hubs := generateClusteredGraph()
+	graph.SetPointPositions(positions)
+	graph.SetPointColors(colors)
+	graph.SetPointSizes(sizes)
+	graph.SetPointShapes(shapes)
+	graph.SetLinks(links)
+	graph.Render()
+	setStatus(fmt.Sprintf("%d points, %d links", len(positions)/2, len(links)/2))
+
 	// expose for automated tests / console poking
 	js.Global().Set("cosmosReady", true)
 	js.Global().Set("cosmosZoom", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		return graph.GetZoomLevel()
 	}))
-	js.Global().Set("cosmosNodeScreen", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-		positions := graph.GetNodePositions()
-		p, ok := positions[args[0].String()]
-		if !ok {
+	js.Global().Set("cosmosPointScreen", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		index := args[0].Int()
+		positions := graph.GetPointPositions()
+		if index*2+1 >= len(positions) {
 			return nil
 		}
-		screen := graph.SpaceToScreenPosition(p)
+		screen := graph.SpaceToScreenPosition([2]float64{positions[index*2], positions[index*2+1]})
 		return []interface{}{screen[0], screen[1]}
 	}))
-
-	nodes, links := generateClusteredGraph(8, 220)
-	graph.SetData(nodes, links, true)
-	setStatus(fmt.Sprintf("%d nodes, %d links", len(nodes), len(links)))
 
 	onClick("btn-fit", func() { graph.FitView(400, 0.1) })
 	onClick("btn-restart", func() { graph.Start(1) })
@@ -136,16 +161,16 @@ func main() {
 			graph.Pause()
 			setStatus("paused")
 		} else {
-			graph.Restart()
+			graph.Unpause()
 			setStatus("running")
 		}
 	})
 	onClick("btn-select", func() {
-		graph.SelectNodeByID("hub-0", true)
-		setStatus("selected hub-0 + neighbors")
+		graph.SelectPointByIndex(hubs[0], true)
+		setStatus("selected cluster 0")
 	})
-	onClick("btn-unselect", func() { graph.UnselectNodes(); setStatus("") })
-	onClick("btn-zoomto", func() { graph.ZoomToNodeByID("hub-3", 700, 3, true) })
+	onClick("btn-unselect", func() { graph.UnselectPoints(); setStatus("") })
+	onClick("btn-zoomto", func() { graph.ZoomToPointByIndex(hubs[3], 700, 3, true) })
 
 	select {}
 }

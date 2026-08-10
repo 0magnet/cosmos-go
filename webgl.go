@@ -126,6 +126,26 @@ func (c *glCtx) newFloatTexture(w, h int, data []float32) *texture {
 	return &texture{ctx: c, tex: tex, w: w, h: h, exists: true}
 }
 
+// newUint8Texture creates a w×h RGBA uint8 texture (used for the image
+// atlas).
+func (c *glCtx) newUint8Texture(w, h int, data []byte) *texture {
+	gl := c.gl
+	tex := gl.Call("createTexture")
+	gl.Call("bindTexture", gl.Get("TEXTURE_2D"), tex)
+	gl.Call("texParameteri", gl.Get("TEXTURE_2D"), gl.Get("TEXTURE_MIN_FILTER"), gl.Get("LINEAR"))
+	gl.Call("texParameteri", gl.Get("TEXTURE_2D"), gl.Get("TEXTURE_MAG_FILTER"), gl.Get("LINEAR"))
+	gl.Call("texParameteri", gl.Get("TEXTURE_2D"), gl.Get("TEXTURE_WRAP_S"), gl.Get("CLAMP_TO_EDGE"))
+	gl.Call("texParameteri", gl.Get("TEXTURE_2D"), gl.Get("TEXTURE_WRAP_T"), gl.Get("CLAMP_TO_EDGE"))
+	var jsData js.Value = js.Null()
+	if data != nil {
+		arr := js.Global().Get("Uint8Array").New(len(data))
+		js.CopyBytesToJS(arr, data)
+		jsData = arr
+	}
+	gl.Call("texImage2D", gl.Get("TEXTURE_2D"), 0, gl.Get("RGBA"), w, h, 0, gl.Get("RGBA"), gl.Get("UNSIGNED_BYTE"), jsData)
+	return &texture{ctx: c, tex: tex, w: w, h: h, exists: true}
+}
+
 func (t *texture) destroy() {
 	if t == nil || !t.exists {
 		return

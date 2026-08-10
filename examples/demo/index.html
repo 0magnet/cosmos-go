@@ -6,7 +6,6 @@
 <title>cosmos-go — GPU force graph in Go/WebAssembly</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1117; }
-  #cosmos { width: 100vw; height: 100vh; display: block; }
   #ui {
     position: fixed;
     top: 12px;
@@ -34,7 +33,7 @@
 </style>
 </head>
 <body>
-<canvas id="cosmos"></canvas>
+<div id="cosmos" style="position: fixed; inset: 0;"></div>
 <div id="ui">
   <h1>cosmos-go</h1>
   <a href="https://github.com/0magnet/cosmos-go">github.com/0magnet/cosmos-go</a>
@@ -48,7 +47,7 @@
   </div>
   <div id="status"></div>
 </div>
-<div id="hint">drag to pan &middot; wheel to zoom &middot; double-click to zoom in &middot; hold right mouse button to repel nodes</div>
+<div id="hint">drag to pan &middot; wheel to zoom &middot; double-click to zoom in &middot; drag points to move them &middot; hold right mouse button to repel points</div>
 <script src="wasm_exec.js"></script>
 <script>
   const go = new Go();

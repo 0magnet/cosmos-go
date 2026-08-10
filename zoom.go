@@ -25,10 +25,10 @@ const (
 	wheelIdleDelay = 150.0 // ms, d3-zoom's wheel gesture idle timeout
 )
 
-// zoomState is the port of the Zoom module plus the subset of d3-zoom
-// behavior cosmos relies on: wheel zoom, drag pan, double-click zoom,
-// touch pan/pinch, and programmatic transforms with smooth transitions
-// (van Wijk & Nuij interpolation, as d3.interpolateZoom).
+// zoomState is the port of the Zoom module plus the subset of d3-zoom and
+// d3-drag behavior cosmos relies on: wheel zoom, drag pan, double-click
+// zoom, touch pan/pinch, point dragging, and programmatic transforms with
+// smooth transitions (van Wijk & Nuij interpolation, as d3.interpolateZoom).
 type zoomState struct {
 	st  *store
 	cfg *Config
@@ -42,6 +42,13 @@ type zoomState struct {
 	onStart func(sourceEvent js.Value)
 	onZoom  func(sourceEvent js.Value)
 	onEnd   func(sourceEvent js.Value)
+
+	// point dragging (the d3-drag behavior of the original)
+	dragActive  bool
+	dragSubject func() bool // whether a drag should start instead of a pan
+	onDragStart func(event js.Value)
+	onDrag      func(event js.Value)
+	onDragEnd   func(event js.Value)
 
 	// mouse pan gesture
 	mousePanning bool
@@ -80,6 +87,9 @@ func (z *zoomState) setTransformNow(t zoomTransform, sourceEvent js.Value) {
 	z.eventTransform = t
 	w := z.st.screenSize[0]
 	h := z.st.screenSize[1]
+	if w == 0 || h == 0 {
+		return
+	}
 	m := &z.st.transform
 	m.projection(w, h)
 	m.translate(t.x, t.y)
@@ -115,8 +125,7 @@ func (z *zoomState) interruptTransition() {
 }
 
 // transformTo applies the target transform, animated over duration
-// milliseconds (0 = instant). Additional targets chain sequentially,
-// each with its own ease and half of the behavior of zoomToNode.
+// milliseconds (0 = instant).
 func (z *zoomState) transformTo(target zoomTransform, duration float64, ease func(float64) float64) {
 	z.transformChain([]zoomTransform{target}, []float64{duration}, []func(float64) float64{ease})
 }
@@ -251,7 +260,7 @@ func (z *zoomState) scaleTo(k float64, duration float64) {
 // ------------------------------------------------------------------ Zoom
 // module methods (getTransform & friends)
 
-// getTransform returns the zoom transform that fits the given node
+// getTransform returns the zoom transform that fits the given point
 // positions (space coordinates) into the viewport.
 func (z *zoomState) getTransform(positions [][2]float64, scale float64, hasScale bool, padding float64) zoomTransform {
 	if len(positions) == 0 {
@@ -271,6 +280,15 @@ func (z *zoomState) getTransform(positions [][2]float64, scale float64, hasScale
 	xMax = z.st.scaleX(xMax)
 	yMin = z.st.scaleY(yMin)
 	yMax = z.st.scaleY(yMax)
+	// adjust extent with one screen pixel if only one point coordinate is set
+	if xMin == xMax {
+		xMin -= 0.5
+		xMax += 0.5
+	}
+	if yMin == yMax {
+		yMin += 0.5
+		yMax -= 0.5
+	}
 
 	xScale := (width * (1 - padding*2)) / (xMax - xMin)
 	yScale := (height * (1 - padding*2)) / (yMin - yMax)
@@ -334,7 +352,7 @@ func (z *zoomState) convertSpaceToScreenPosition(spacePosition [2]float64) [2]fl
 
 func (z *zoomState) convertSpaceToScreenRadius(spaceRadius float64) float64 {
 	size := spaceRadius * 2
-	if z.cfg.ScaleNodesOnZoom {
+	if z.cfg.ScalePointsOnZoom {
 		size *= z.eventTransform.k
 	} else {
 		size *= math.Min(5.0, math.Max(1.0, z.eventTransform.k*0.01))
@@ -358,7 +376,7 @@ func eventOffset(canvas js.Value, event js.Value) [2]float64 {
 	}
 }
 
-// attach wires the DOM listeners (the d3-zoom behavior + selection.call).
+// attach wires the DOM listeners (the d3-zoom + d3-drag behaviors).
 func (z *zoomState) attach(canvas js.Value) {
 	z.canvas = canvas
 	win := js.Global()
@@ -394,18 +412,31 @@ func (z *zoomState) attach(canvas js.Value) {
 		z.scheduleWheelEnd()
 	})
 
-	// drag pan
+	// drag pan / point drag
 	listen(canvas, "mousedown", true, func(event js.Value) {
 		if event.Get("button").Int() != 0 || event.Get("ctrlKey").Bool() {
 			return
 		}
 		z.interruptTransition()
+		if z.cfg.EnableDrag && z.dragSubject != nil && z.dragSubject() {
+			z.dragActive = true
+			if z.onDragStart != nil {
+				z.onDragStart(event)
+			}
+			return
+		}
 		z.mousePanning = true
 		p := eventOffset(canvas, event)
 		z.panAnchor = z.eventTransform.invert(p)
 		z.startGesture(event)
 	})
 	listen(win, "mousemove", true, func(event js.Value) {
+		if z.dragActive {
+			if z.onDrag != nil {
+				z.onDrag(event)
+			}
+			return
+		}
 		if !z.mousePanning {
 			return
 		}
@@ -418,6 +449,13 @@ func (z *zoomState) attach(canvas js.Value) {
 		}, event)
 	})
 	listen(win, "mouseup", true, func(event js.Value) {
+		if z.dragActive {
+			z.dragActive = false
+			if z.onDragEnd != nil {
+				z.onDragEnd(event)
+			}
+			return
+		}
 		if z.mousePanning {
 			z.mousePanning = false
 			z.endGesture(event)
