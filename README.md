@@ -44,10 +44,11 @@ func main() {
 
     // flat typed-array data, exactly like the JS API
     graph.SetPointPositions([]float32{4000, 4000, 4100, 4000, 4050, 4100}) // [x1,y1, x2,y2, ...]
-    graph.SetPointColors([]float32{ // [r,g,b,a, ...] with RGB 0..255, alpha 0..1
-        253, 127, 111, 1,
-        126, 176, 213, 1,
-        178, 224, 97, 1,
+    red := cosmos.GetRgbaColor("#fd7f6f") // colors are normalized 0..1 RGBA
+    graph.SetPointColors([]float32{
+        red[0], red[1], red[2], red[3],
+        0.49, 0.69, 0.84, 1,
+        0.70, 0.88, 0.38, 1,
     })
     graph.SetLinks([]float32{0, 1, 1, 2, 2, 0}) // [source1,target1, ...] point indices
 
