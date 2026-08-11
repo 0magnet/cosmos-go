@@ -5,6 +5,7 @@ package cosmos
 import (
 	"strconv"
 	"strings"
+	"syscall/js"
 )
 
 // cssNamedColors covers the CSS color keywords (as d3-color would parse).
@@ -96,6 +97,11 @@ func parseRGBA(value string) [4]float64 {
 			}
 		}
 	}
+	if strings.HasPrefix(value, "hsl") {
+		if c, ok := parseHSL(value); ok {
+			return c
+		}
+	}
 	if rgb, ok := cssNamedColors[value]; ok {
 		return [4]float64{
 			float64(rgb>>16&0xff) / 255,
@@ -104,7 +110,130 @@ func parseRGBA(value string) [4]float64 {
 			1,
 		}
 	}
+	// Anything else — modern CSS colour syntax, or a keyword this table does
+	// not carry — goes to the browser, which knows every format there is.
+	// cosmos.gl's own getRgbaColor delegates to the browser for everything, so
+	// falling back keeps parity; silently returning black does not.
+	if c, ok := parseViaBrowser(value); ok {
+		return c
+	}
 	return [4]float64{0, 0, 0, 1}
+}
+
+// parseHSL handles hsl()/hsla() in both the comma and the space-separated
+// syntax, with the hue in degrees and saturation and lightness in percent.
+func parseHSL(value string) ([4]float64, bool) {
+	open := strings.IndexByte(value, '(')
+	closing := strings.IndexByte(value, ')')
+	if open < 0 || closing <= open {
+		return [4]float64{}, false
+	}
+	body := value[open+1 : closing]
+	body = strings.ReplaceAll(body, "/", " ")
+	body = strings.ReplaceAll(body, ",", " ")
+	parts := strings.Fields(body)
+	if len(parts) < 3 {
+		return [4]float64{}, false
+	}
+	num := func(s string) (float64, bool) {
+		pct := strings.HasSuffix(s, "%")
+		s = strings.TrimSuffix(s, "%")
+		s = strings.TrimSuffix(s, "deg")
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return 0, false
+		}
+		if pct {
+			v /= 100
+		}
+		return v, true
+	}
+	h, ok1 := num(parts[0])
+	sat, ok2 := num(parts[1])
+	light, ok3 := num(parts[2])
+	if !ok1 || !ok2 || !ok3 {
+		return [4]float64{}, false
+	}
+	a := 1.0
+	if len(parts) >= 4 {
+		if v, ok := num(parts[3]); ok {
+			a = v
+		}
+	}
+	r, g, b := hslToRGB(h, sat, light)
+	return [4]float64{r, g, b, a}, true
+}
+
+// hslToRGB converts HSL (hue in degrees, saturation and lightness 0..1) to
+// RGB in 0..1, by the CSS Color 3 formula.
+func hslToRGB(h, s, l float64) (float64, float64, float64) {
+	h = mod(h, 360) / 360
+	if s <= 0 {
+		return l, l, l
+	}
+	var q float64
+	if l < 0.5 {
+		q = l * (1 + s)
+	} else {
+		q = l + s - l*s
+	}
+	p := 2*l - q
+	return hueToRGB(p, q, h+1.0/3.0), hueToRGB(p, q, h), hueToRGB(p, q, h-1.0/3.0)
+}
+
+func hueToRGB(p, q, t float64) float64 {
+	t = mod(t, 1)
+	switch {
+	case t < 1.0/6.0:
+		return p + (q-p)*6*t
+	case t < 1.0/2.0:
+		return q
+	case t < 2.0/3.0:
+		return p + (q-p)*(2.0/3.0-t)*6
+	}
+	return p
+}
+
+func mod(v, m float64) float64 {
+	r := v - m*float64(int(v/m))
+	if r < 0 {
+		r += m
+	}
+	return r
+}
+
+// browserColorCtx is a 1x1 canvas context kept for colour normalisation; the
+// browser rewrites any CSS colour assigned to fillStyle into #rrggbb or
+// rgba(...), which the parsers above already understand.
+var browserColorCtx js.Value
+
+func parseViaBrowser(value string) ([4]float64, bool) {
+	doc := js.Global().Get("document")
+	if !doc.Truthy() {
+		return [4]float64{}, false
+	}
+	if !browserColorCtx.Truthy() {
+		canvas := doc.Call("createElement", "canvas")
+		canvas.Set("width", 1)
+		canvas.Set("height", 1)
+		browserColorCtx = canvas.Call("getContext", "2d")
+		if !browserColorCtx.Truthy() {
+			return [4]float64{}, false
+		}
+	}
+	// An invalid colour leaves fillStyle unchanged, so seed a known value and
+	// treat "unchanged" as a parse failure.
+	const sentinel = "#010203"
+	browserColorCtx.Set("fillStyle", sentinel)
+	browserColorCtx.Set("fillStyle", value)
+	got := browserColorCtx.Get("fillStyle").String()
+	if got == sentinel || got == "" {
+		return [4]float64{}, false
+	}
+	if strings.HasPrefix(got, "#") || strings.HasPrefix(got, "rgb") {
+		return parseRGBA(got), true
+	}
+	return [4]float64{}, false
 }
 
 // GetRgbaColor converts a CSS color string into normalized [r g b a]
