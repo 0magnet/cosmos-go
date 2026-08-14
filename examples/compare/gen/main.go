@@ -21,6 +21,8 @@ const (
 )
 
 func main() {
+	// #nosec G404 -- a fixed seed generates reproducible sample data; nothing
+	// here is a secret.
 	r := rand.New(rand.NewSource(42))
 	var positions, colors, sizes, shapes, links []float32
 	var hubs []int
@@ -63,7 +65,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer out.Close()
+	defer func() {
+		if err := out.Close(); err != nil {
+			panic(err) // a failed close means the JSON never landed
+		}
+	}()
 	if err := json.NewEncoder(out).Encode(map[string]interface{}{
 		"positions": positions,
 		"colors":    colors,

@@ -29,6 +29,8 @@ const (
 )
 
 func generateClusteredGraph() (positions, colors, sizes, shapes []float32, links []float32, hubs []int) {
+	// #nosec G404 -- a fixed seed generates reproducible sample data; nothing
+	// here is a secret.
 	r := rand.New(rand.NewSource(42))
 	total := clusters * (pointsPerCluster + 1)
 	positions = make([]float32, 0, total*2)
@@ -73,7 +75,7 @@ func generateClusteredGraph() (positions, colors, sizes, shapes []float32, links
 			links = append(links, float32(hubs[c]), float32(hubs[r.Intn(clusters)]))
 		}
 	}
-	return
+	return positions, colors, sizes, shapes, links, hubs
 }
 
 func setStatus(text string) {
