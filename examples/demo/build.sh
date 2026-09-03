@@ -17,4 +17,4 @@ else
 fi
 
 echo "built demo.wasm ($(du -h demo.wasm | cut -f1))"
-echo "serve with e.g.: python3 -m http.server 8080"
+echo "serve with: go run ./serve  (from this directory)"
