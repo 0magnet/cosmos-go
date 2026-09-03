@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cosmos.gl 2.6.3 (original)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1117; }
+  #cosmos { position: fixed; inset: 0; }
+</style>
+</head>
+<body>
+<div id="cosmos"></div>
+<script type="module">
+  import { Graph } from "https://cdn.jsdelivr.net/npm/@cosmos.gl/graph@2.6.3/+esm";
+
+  const sim = new URLSearchParams(location.search).get("sim") !== "0";
+  const det = new URLSearchParams(location.search).get("det") === "1";
+
+  const config = {
+    enableSimulation: sim,
+    backgroundColor: "#0d1117",
+    spaceSize: 8192,
+    linkDefaultColor: "#5F74C2",
+    renderHoveredPointRing: true,
+    hoveredPointRingColor: "white",
+    enableDrag: true,
+    enableRightClickRepulsion: true,
+    simulationRepulsion: 1.0,
+    simulationLinkSpring: 1.2,
+    simulationLinkDistance: 10,
+    simulationGravity: 0.25,
+    simulationDecay: 5000,
+    randomSeed: new URLSearchParams(location.search).get("seed") || "skywire",
+  };
+  if (det) config.simulationLinkDistRandomVariationRange = [1, 1];
+
+  const graph = new Graph(document.getElementById("cosmos"), config);
+
+  const data = await (await fetch("data.json")).json();
+  graph.setPointPositions(new Float32Array(data.positions));
+  graph.setPointColors(new Float32Array(data.colors));
+  graph.setPointSizes(new Float32Array(data.sizes));
+  graph.setPointShapes(new Float32Array(data.shapes));
+  graph.setLinks(new Float32Array(data.links));
+  if (new URLSearchParams(location.search).get("alpha0") === "1") graph.render(0);
+  else graph.render();
+  window.graphReady = true;
+
+  window.hookZoom = () => graph.getZoomLevel();
+  window.hookFit = () => graph.fitView(0, 0.1);
+  window.hookRect = (x0, y0, x1, y1) => Array.from(graph.getPointsInRect([[x0, y0], [x1, y1]]));
+  window.hookPositions = () => Array.from(graph.getPointPositions());
+  window.hookPause = () => graph.pause();
+  window.hookS2S = (x, y) => graph.spaceToScreenPosition([x, y]);
+  window.hookPrep = () => { graph.start(1); graph.pause(); };
+  window.hookStep = (n) => { for (let i = 0; i < n; i++) graph.step(); };
+</script>
+</body>
+</html>
