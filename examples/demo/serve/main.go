@@ -10,6 +10,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"time"
 )
 
 func main() {
@@ -17,5 +18,17 @@ func main() {
 	dir := flag.String("dir", ".", "directory to serve")
 	flag.Parse()
 	log.Printf("serving %s on http://localhost%s", *dir, *addr)
-	log.Fatal(http.ListenAndServe(*addr, http.FileServer(http.Dir(*dir))))
+	// An http.Server rather than ListenAndServe: the bare helper sets no
+	// timeouts at all, so a stalled client holds a connection forever. The
+	// write timeout is generous because a .wasm binary is large and a slow
+	// link should not have its download cut off mid-file.
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           http.FileServer(http.Dir(*dir)),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
