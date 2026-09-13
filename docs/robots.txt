@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://cosmos-go.magnetosphere.net/sitemap.xml

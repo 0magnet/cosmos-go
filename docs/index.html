@@ -4,6 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cosmos-go — GPU force graph in Go/WebAssembly</title>
+<!-- seo:begin -->
+<meta name="description" content="A Go port of cosmos.gl: GPU force-directed graph layout and WebGL rendering, simulating network graphs of hundreds of thousands of points and links in real time.">
+<meta name="author" content="0magnet">
+<link rel="canonical" href="https://cosmos-go.magnetosphere.net/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="magnetosphere">
+<meta property="og:title" content="cosmos-go — GPU force-directed graph layout in Go">
+<meta property="og:description" content="A Go port of cosmos.gl: GPU force-directed graph layout and WebGL rendering, simulating network graphs of hundreds of thousands of points and links in real time.">
+<meta property="og:url" content="https://cosmos-go.magnetosphere.net/">
+<meta property="og:image" content="https://cosmos-go.magnetosphere.net/cosmos-go-demo.png">
+<meta property="og:image:alt" content="A GPU force simulation running in WebGL, points and links drawn from shaders">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="cosmos-go — GPU force-directed graph layout in Go">
+<meta name="twitter:description" content="A Go port of cosmos.gl: GPU force-directed graph layout and WebGL rendering, simulating network graphs of hundreds of thousands of points and links in real time.">
+<meta name="twitter:image" content="https://cosmos-go.magnetosphere.net/cosmos-go-demo.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebApplication","applicationCategory":"VisualizationApplication","author":{"@type":"Person","name":"0magnet"},"browserRequirements":"Requires WebAssembly","description":"A Go port of cosmos.gl: GPU force-directed graph layout and WebGL rendering, simulating network graphs of hundreds of thousands of points and links in real time.","image":"https://cosmos-go.magnetosphere.net/cosmos-go-demo.png","isAccessibleForFree":true,"name":"cosmos-go — GPU force-directed graph layout in Go","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"operatingSystem":"Any (modern web browser)","sameAs":"https://github.com/0magnet/cosmos-go","url":"https://cosmos-go.magnetosphere.net/"}
+</script>
+<!-- seo:end -->
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1117; }
   #ui {
@@ -33,6 +52,15 @@
 </style>
 </head>
 <body>
+<!-- seo:begin -->
+<div style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">
+<h1>cosmos-go — a GPU force graph engine in Go</h1>
+<p>A full Go port of cosmos.gl 2.6.3, the WebGL force-directed layout algorithm and rendering engine behind Cosmograph and, in its 1.x form, the Skywire network visualizer. Every computation and every draw happens on the GPU in vertex and fragment shaders, carried over verbatim from the original, which is what makes real-time layout of very large network graphs possible.</p>
+<p>The port drives the shaders through syscall/js with a raw WebGL command layer replacing regl, and reimplements the d3-zoom and d3-drag interaction behaviours including d3&#39;s smooth van Wijk–Nuij zoom transitions. It compiles with both the standard Go toolchain and TinyGo.</p>
+<p>Ported features: GPU many-body repulsion in two variants, springs, gravity, centering, mouse repulsion and clustering forces; pan and zoom; point dragging and pinning; nine point shapes; image-atlas point sprites; hover and focus rings; GPU picking for points and links; link arrows and curved links; rectangle and polygon selection with greyout; position tracking, viewport sampling, fit-view animation and deterministic layouts from a random seed.</p>
+<p>Source code: <a href="https://github.com/0magnet/cosmos-go">github.com/0magnet/cosmos-go</a>. More Go and WebAssembly projects: <a href="https://magnetosphere.net/software">magnetosphere.net/software</a>.</p>
+</div>
+<!-- seo:end -->
 <div id="cosmos" style="position: fixed; inset: 0;"></div>
 <div id="ui">
   <h1>cosmos-go</h1>
