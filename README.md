@@ -146,6 +146,14 @@ The initial release of cosmos-go (tag `v1-port`) was a port of @cosmograph/cosmo
 MIT, same as the ported cosmos.gl 2.6.3 source (see LICENCE).
 
 cosmos-go is derived from [cosmos.gl](https://github.com/cosmograph-org/cosmos) — © Contributors to the cosmos.gl project, created by the [Cosmograph](https://cosmograph.app) team.
+
+## Related projects
+
+Other projects around cosmos.gl and force-directed graphs:
+
+- [Cosmograph](https://cosmograph.app) — the graph and embedding explorer built on cosmos.gl, the library cosmos-go ports
+- [Graph growing automata](https://znah.net/graphs/) — Game of Life on growing graphs (WebAssembly + WebGL), a good force-layout workload
+
 ## Dependency Graph
 
 Made with [goda](https://github.com/loov/goda):
