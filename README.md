@@ -5,7 +5,7 @@
 
 cosmos-go is a full Go port of [cosmos.gl](https://github.com/cosmograph-org/cosmos) **2.6.3** (MIT), the WebGL force graph layout algorithm and rendering engine behind [Cosmograph](https://cosmograph.app) — and, in its 1.x form, the Skywire network visualizer. All computations and drawing happen on the GPU in fragment and vertex shaders (carried over verbatim from the original), avoiding expensive memory operations. It enables real-time simulation of network graphs consisting of hundreds of thousands of points and links on modern hardware.
 
-The Go port drives the shaders through `syscall/js` with a raw-WebGL command layer (replacing `regl`), reimplements the d3-zoom / d3-drag interaction behaviors — including d3's smooth van Wijk–Nuij zoom transitions — and compiles with both the **standard Go toolchain** (`GOOS=js GOARCH=wasm`, ~3.4 MB) and **TinyGo** (`-target wasm`, ~610 KB).
+The Go port drives the shaders through `syscall/js` with a raw-WebGL command layer (replacing `regl`), reimplements the d3-zoom / d3-drag interaction behaviors — including d3's smooth van Wijk–Nuij zoom transitions — and compiles with both the **standard Go toolchain** (`GOOS=js GOARCH=wasm`, ~3.4 MB) and **TinyGo** (`-target wasm`, ~620 KB).
 
 [🎮 Live demo](https://cosmos-go.magnetosphere.net/) (compiled with TinyGo)
 
@@ -178,14 +178,17 @@ gocloc --not-match-d='(vendor|node_modules|\.git)' .
 -------------------------------------------------------------------------------
 Language                     files          blank        comment           code
 -------------------------------------------------------------------------------
-Go                              21            888            533           6271
+Go                              25            961            638           6921
 JavaScript                       2            117             82            935
-HTML                             3              5              0            132
-Markdown                         1             42              0            104
-YAML                             1              0              9             69
-JSON                             3              0              0             29
-Bourne Shell                     1              2              3             12
+HTML                             4              5              4            214
+Markdown                         1             54              0            137
+YAML                             1              0              7             98
+Makefile                         1             19             34             95
+Bourne Shell                     3             19             51             71
+JSON                             2              0              0              9
+XML                              1              0              0              4
+Plain Text                       1              1              0              3
 -------------------------------------------------------------------------------
-TOTAL                           32           1054            627           7552
+TOTAL                           41           1176            816           8487
 -------------------------------------------------------------------------------
 ```
