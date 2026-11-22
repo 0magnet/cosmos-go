@@ -1,0 +1,71 @@
+name: demo
+
+# Build the browser demo with TinyGo and commit it to docs/, which is what
+# GitHub Pages serves (main:/docs, legacy build: the committed wasm IS the
+# site). It was examples/demo/build.sh run by hand before this, so the site
+# carried whatever toolchain the last machine to run it had, and none of the
+# 0magnet/tinygo fixes since.
+on:
+  push:
+    branches: [main]
+    # Only when something that changes the binary changes. docs/ is excluded so
+    # this cannot answer its own commit.
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'examples/demo/**'
+      - 'scripts/tinygo-toolchain.sh'
+      - '.github/workflows/demo.yml'
+  workflow_dispatch:
+
+concurrency:
+  # A second push while this runs would race to commit docs/. Newer wins.
+  group: demo-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Go is pinned rather than taken from the runner, so the build is
+      # reproducible. TinyGo is the 0magnet/tinygo toolchain release (its
+      # develop branch, rebuilt on every push there), as desk, pisano, websh,
+      # xterm-go and chaosrack build with.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+          cache: false
+
+      - name: install TinyGo (0magnet/tinygo)
+        run: |
+          curl -sSfL https://github.com/0magnet/tinygo/releases/download/toolchain/tinygo.linux-amd64.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/tinygo/bin" >> "$GITHUB_PATH"
+
+      - name: build the demo into docs/
+        run: |
+          set -eu
+          tinygo version
+          sh examples/demo/build.sh tinygo
+          cp examples/demo/demo.wasm examples/demo/wasm_exec.js docs/
+
+      - name: commit docs/ if it changed
+        run: |
+          set -eu
+          if git diff --quiet -- docs; then
+            echo "docs/ unchanged; nothing to publish"
+            exit 0
+          fi
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs
+          # The marker stops this build product from starting the whole
+          # workflow set again. Never write it into another commit's message:
+          # GitHub reads the whole body for it and skips every workflow.
+          git commit -m 'docs: rebuild the browser demo [skip ci]'
+          git push
